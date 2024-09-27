@@ -1,0 +1,25 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+crypto = "0"
+crypto-bigint = "0"
+hmac = "0"
+lazy_static = "1"
+nohash-hasher = "0"
+num-bigint = "0"
+num-traits = "0"
+rand = "0"
+rc4 = "0"
+sha1 = "0"
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+
+[lib]
+name = "client"
+path = "src/lib.rs"
