@@ -106,7 +106,7 @@ fn partition<T: Copy>(s: &[T]) -> (Vec<T>, Vec<T>) {
 
 fn calculate_proof_SRP(auth: AuthResponse) -> WowCliResult<(Proof, SessionKey)> {
     let B = BigUint::from_bytes_le(&auth.B);
-    let g = BigUint::from_bytes_le(&[auth.g]);
+    let g = BigUint::from_bytes_le(&auth.g);
     let N = BigUint::from_bytes_le(&auth.N);
     let s = BigUint::from_bytes_le(&auth.salt);
 
@@ -142,7 +142,7 @@ fn calculate_proof_SRP(auth: AuthResponse) -> WowCliResult<(Proof, SessionKey)> 
     let (s_even, s_odd) = partition(&s_bytes);
     let session_key = interleave(&sha1_hash(s_even), &sha1_hash(s_odd))?;
     let Nhash = sha1_hash(auth.N);
-    let ghash = sha1_hash([auth.g]);
+    let ghash = sha1_hash(auth.g);
 
     let gNhash: Vec<u8> = ghash.into_iter().zip(Nhash).map(|(g, n)| g ^ n).collect();
 

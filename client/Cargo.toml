@@ -12,9 +12,10 @@ lazy_static = "1"
 nohash-hasher = "0"
 num-bigint = "0"
 num-traits = "0"
-rand = "0"
+rand = { version = "0.8.5", features = ["min_const_gen"] }
 rc4 = "0"
 sha1 = "0"
+tokio = "1.40.0"
 
 [[bin]]
 name = "client"

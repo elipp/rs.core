@@ -7,3 +7,4 @@ edition = "2021"
 bytemuck = { version = "1.18.0", features = ["derive"] }
 tokio = { version="1", features=["full"] }
 client = { path="../client" }
+rand = { version = "0.8.5", features = ["min_const_gen"] }

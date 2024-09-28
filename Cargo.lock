@@ -23,6 +23,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "client",
+ "rand",
  "tokio",
 ]
 
@@ -125,6 +126,7 @@ dependencies = [
  "rand",
  "rc4",
  "sha1",
+ "tokio",
 ]
 
 [[package]]
