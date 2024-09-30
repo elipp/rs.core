@@ -1,7 +1,6 @@
 use client::{
-    commands, sha1_hash, sha1_hash_iter, sha1_hmac, vec_to_zero_padded_array, AsByteSlice,
-    AuthLogonProof, AuthResponse, Proof, SessionKey, WowRc4, WOW_DECRYPTION_KEY,
-    WOW_ENCRYPTION_KEY,
+    commands, sha1_hash, sha1_hash_iter, sha1_hmac, vec_to_zero_padded_array, AuthClientProof,
+    AuthServerProof, AuthResponse, SessionKey, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY,
 };
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -9,6 +8,7 @@ use rand::Rng;
 use std::io::prelude::*;
 use std::mem::{size_of, MaybeUninit};
 use std::net::TcpStream;
+use zerocopy::AsBytes;
 
 use rc4::{Key, Rc4, StreamCipher};
 
@@ -104,7 +104,7 @@ fn partition<T: Copy>(s: &[T]) -> (Vec<T>, Vec<T>) {
     (a, b)
 }
 
-fn calculate_proof_SRP(auth: AuthResponse) -> WowCliResult<(Proof, SessionKey)> {
+fn calculate_proof_SRP(auth: AuthResponse) -> WowCliResult<(AuthClientProof, SessionKey)> {
     let B = BigUint::from_bytes_le(&auth.B);
     let g = BigUint::from_bytes_le(&auth.g);
     let N = BigUint::from_bytes_le(&auth.N);
@@ -155,7 +155,7 @@ fn calculate_proof_SRP(auth: AuthResponse) -> WowCliResult<(Proof, SessionKey)> 
     m1.extend(&session_key);
 
     Ok((
-        Proof {
+        AuthClientProof {
             cmd: commands::AUTH_LOGON_PROOF,
             A: A_bytes,
             M1: sha1_hash(m1),
@@ -421,7 +421,7 @@ fn main() -> WowCliResult<()> {
         }
         let (proof, session_key) = calculate_proof_SRP(auth)?;
         stream.write_all(proof.as_bytes())?;
-        let server_proof: AuthLogonProof = unsafe { read_as(&mut stream) }?;
+        let server_proof: AuthServerProof = unsafe { read_as(&mut stream) }?;
 
         if server_proof.cmd == commands::AUTH_LOGON_PROOF && server_proof.error == 0x0 {
             println!("login at {} as {} successful!", REALMSERVER, USERNAME);

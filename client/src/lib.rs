@@ -1,11 +1,18 @@
-use bytemuck::{AnyBitPattern, NoUninit};
+use core::str;
+
 use crypto::common::typenum::{UInt, UTerm};
 use hmac::{Hmac, Mac};
+use num_bigint::BigUint;
 use rc4::{
     cipher::InvalidLength,
     consts::{B0, B1},
 };
 use sha1::{Digest, Sha1};
+
+use rand::Rng;
+use tokio::{io::AsyncReadExt, net::TcpStream};
+use zerocopy::byteorder::network_endian;
+use zerocopy::{AsBytes, FromBytes, FromZeroes, Unaligned};
 
 const SHA_DIGEST_LENGTH: usize = 20;
 
@@ -61,16 +68,10 @@ const _TBC_KEY_SEED: &[u8] = &[
 ];
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, FromZeroes, FromBytes, AsBytes)]
 pub struct PktHeader {
-    opcode: u16,
+    opcode: network_endian::U16,
     length: u16,
-}
-
-pub unsafe trait AsByteSlice: Sized + AnyBitPattern {
-    fn as_bytes<'b>(&'b self) -> &'b [u8] {
-        unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, size_of::<Self>()) }
-    }
 }
 
 #[derive(Debug)]
@@ -79,57 +80,62 @@ pub enum ProtocolError {
     BadWowVersion,
     BadWowBuild,
     Error(String),
+    Utf8Error,
+    UnsupportedOsArch,
+    AuthenticationError(String),
 }
+
+pub trait ZerocopyTraits: FromZeroes + FromBytes + AsBytes + Unaligned + Sized + 'static {}
 
 const H: usize = size_of::<PktHeader>();
 
-pub trait WowRawPacket: AsByteSlice {
+pub trait WowRawPacket: ZerocopyTraits {
     const S: usize = size_of::<Self>();
 
+    #[allow(async_fn_in_trait)]
     async fn read_as_rawpacket<'b>(
         socket: &mut TcpStream,
         buf: &'b mut [u8],
-    ) -> Result<&'b Self, ProtocolError> {
+    ) -> Result<Option<&'b Self>, ProtocolError> {
         socket
-            .read_exact(&mut buf[..H])
+            .read_exact(&mut buf[..Self::S])
             .await
             .map_err(|e| ProtocolError::Error(format!("{e:?}")))?;
 
-        Ok(bytemuck::from_bytes(&buf[..Self::S]))
+        Ok(Self::ref_from(&buf[..Self::S]))
     }
 }
 
-pub trait WowPacket: AsByteSlice {
+pub trait WowPacket: ZerocopyTraits {
     const S: usize = size_of::<Self>();
 
+    #[allow(async_fn_in_trait)]
     async fn read_as_wowprotopacket<'b>(
         socket: &mut TcpStream,
         buf: &'b mut [u8],
-    ) -> Result<(&'b Self, &'b [u8]), ProtocolError> {
+    ) -> Result<(Option<&'b Self>, &'b [u8]), ProtocolError> {
         socket
             .read_exact(&mut buf[..H])
             .await
             .map_err(|e| ProtocolError::Error(format!("{e:?}")))?;
-        let header = PktHeader {
-            opcode: u16::from_be_bytes(buf[..2].try_into().unwrap()),
-            length: u16::from_le_bytes(buf[2..4].try_into().unwrap()),
-        };
-        socket
-            .read_exact(&mut buf[H..H + header.length as usize])
-            .await
-            .expect("failed to read data from socket");
+        if let Some(header) = PktHeader::read_from(&buf[..H]) {
+            socket
+                .read_exact(&mut buf[H..H + header.length as usize])
+                .await
+                .expect("failed to read data from socket");
 
-        let content = &buf[size_of_val(&header)..(size_of_val(&header) + header.length as usize)];
+            let content =
+                &buf[size_of_val(&header)..(size_of_val(&header) + header.length as usize)];
 
-        Ok((
-            bytemuck::from_bytes(&content[..Self::S]),
-            &content[Self::S..],
-        ))
+            Ok((Self::ref_from(&content[..Self::S]), &content[Self::S..]))
+        } else {
+            Err(ProtocolError::Error(format!("bad header")))
+        }
     }
 }
 
 #[repr(packed)]
-#[derive(AnyBitPattern, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, AsBytes, FromBytes, FromZeroes, Unaligned)]
 pub struct AuthChallenge {
     wow: [u8; 4],
     version: [u8; 3],
@@ -141,6 +147,18 @@ pub struct AuthChallenge {
 }
 
 const WOTLK_BUILD: u16 = 12340;
+
+#[derive(Debug)]
+pub enum ClientOs {
+    Windows,
+    Mac,
+}
+
+#[derive(Debug)]
+pub enum ClientArch {
+    X86,
+    Ppc,
+}
 
 impl AuthChallenge {
     pub fn validate(&self) -> Result<(), ProtocolError> {
@@ -155,13 +173,32 @@ impl AuthChallenge {
         }
         Ok(())
     }
+    pub fn get_client_language(&self) -> Result<String, ProtocolError> {
+        Ok(str::from_utf8(&self.client_info_reversed[8..])
+            .map_err(|_| ProtocolError::Utf8Error)?
+            .chars()
+            .rev()
+            .collect())
+    }
+
+    // const CLIENTINFO: &[u8] = b"68x\0niW\0SUne";
+
+    pub fn get_client_os_platform(&self) -> Result<(ClientOs, ClientArch), ProtocolError> {
+        match (
+            &self.client_info_reversed[4..7],
+            &self.client_info_reversed[..3],
+        ) {
+            (b"niW", b"68x") => Ok((ClientOs::Windows, ClientArch::X86)),
+            _ => Err(ProtocolError::UnsupportedOsArch),
+        }
+    }
 }
 
-unsafe impl AsByteSlice for AuthChallenge {}
+impl ZerocopyTraits for AuthChallenge {}
 impl WowPacket for AuthChallenge {}
 
 #[repr(packed)]
-#[derive(AnyBitPattern, Debug, Default, Clone, Copy)]
+#[derive(Clone, Copy, Debug, AsBytes, FromBytes, FromZeroes, Unaligned)]
 pub struct AuthResponse {
     pub opcode: u8,
     pub u1: u8,
@@ -176,12 +213,10 @@ pub struct AuthResponse {
     pub securityFlags: u8,
 }
 
+impl ZerocopyTraits for AuthResponse {}
 impl WowPacket for AuthResponse {}
 
-use rand::Rng;
-use tokio::{io::AsyncReadExt, net::TcpStream};
-
-fn generate_random_bytes<const N: usize>() -> [u8; N] {
+pub fn generate_random_bytes<const N: usize>() -> [u8; N] {
     let mut rng = rand::thread_rng();
     let mut bytes = [0u8; N];
     rng.fill(&mut bytes);
@@ -206,11 +241,9 @@ impl AuthResponse {
     }
 }
 
-unsafe impl AsByteSlice for AuthResponse {}
-
 #[repr(packed)]
-#[derive(Debug, AnyBitPattern, Clone, Copy)]
-pub struct AuthLogonProof {
+#[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes, Unaligned)]
+pub struct AuthServerProof {
     pub cmd: u8,
     pub error: u8,
     pub M2: [u8; 20],
@@ -219,10 +252,10 @@ pub struct AuthLogonProof {
     pub unkFlags: u16,
 }
 
-unsafe impl AsByteSlice for AuthLogonProof {}
-impl WowRawPacket for AuthLogonProof {}
+impl ZerocopyTraits for AuthServerProof {}
+impl WowRawPacket for AuthServerProof {}
 
-impl AuthLogonProof {
+impl AuthServerProof {
     pub fn validate() -> Result<(), ProtocolError> {
         Ok(())
     }
@@ -237,8 +270,8 @@ pub mod commands {
 pub type SessionKey = [u8; 40];
 
 #[repr(packed)]
-#[derive(Debug, AnyBitPattern, Clone, Copy)]
-pub struct Proof {
+#[derive(Clone, Copy, Debug, AsBytes, FromBytes, FromZeroes, Unaligned)]
+pub struct AuthClientProof {
     pub cmd: u8,
     pub A: [u8; 32],
     pub M1: [u8; 20],
@@ -247,4 +280,41 @@ pub struct Proof {
     pub security_flags: u8,
 }
 
-unsafe impl AsByteSlice for Proof {}
+impl ZerocopyTraits for AuthClientProof {}
+impl WowRawPacket for AuthClientProof {}
+
+// /*static*/ std::array<uint8, 1> const SRP6::g = { 7 };
+// /*static*/ std::array<uint8, 32> const SRP6::N = HexStrToByteArray<32>("894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7", true);
+// /*static*/ BigNumber const SRP6::_g(SRP6::g);
+// /*static*/ BigNumber const SRP6::_N(N);
+
+#[allow(non_upper_case_globals)]
+pub mod srp6 {
+    use num_bigint::BigUint;
+    use num_traits::Num;
+    use std::sync::LazyLock;
+
+    pub const g: LazyLock<BigUint> = LazyLock::new(|| BigUint::from_bytes_be(&[0x7]));
+    pub const N: LazyLock<BigUint> = LazyLock::new(|| {
+        BigUint::from_str_radix(
+            "894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7",
+            16,
+        )
+        .unwrap()
+    });
+}
+
+impl AuthClientProof {
+    // static Verifier CalculateVerifier(std::string const& username, std::string const& password, Salt const& salt);
+    // static EphemeralKey _B(BigNumber const& b, BigNumber const& v) { return ((_g.ModExp(b, _N) + (v * 3)) % N).ToByteArray<EPHEMERAL_KEY_LENGTH>(); }
+
+    fn authenticate(&self, account: &Account) -> Result<(), ProtocolError> {
+        let one = BigUint::from(1u32);
+        let iA = BigUint::from_bytes_le(&self.A);
+        if iA.modpow(&one, &*srp6::N) == BigUint::ZERO {
+            return Err(ProtocolError::AuthenticationError(format!("bad iA {iA}")));
+        }
+
+        Ok(())
+    }
+}

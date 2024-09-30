@@ -8,3 +8,7 @@ bytemuck = { version = "1.18.0", features = ["derive"] }
 tokio = { version="1", features=["full"] }
 client = { path="../client" }
 rand = { version = "0.8.5", features = ["min_const_gen"] }
+zerocopy = { version = "0.7.35", features = ["byteorder", "derive"] }
+tokio-postgres = "0.7.12"
+deadpool-postgres = "0.14.0"
+num-bigint = "0.4.6"

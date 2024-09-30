@@ -1,0 +1,12 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: asd
+      POSTGRES_USER: auth
+      POSTGRES_DB: auth
+    ports:
+      - 5432:5432
+
+volumes:
+  db-data:

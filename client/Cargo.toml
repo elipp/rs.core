@@ -16,6 +16,7 @@ rand = { version = "0.8.5", features = ["min_const_gen"] }
 rc4 = "0"
 sha1 = "0"
 tokio = "1.40.0"
+zerocopy = { version = "0.7.35", features = ["byteorder", "derive"] }
 
 [[bin]]
 name = "client"
