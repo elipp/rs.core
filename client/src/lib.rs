@@ -5,6 +5,7 @@ mod opcodes;
 use crypto::common::typenum::{UInt, UTerm};
 use hmac::{Hmac, Mac};
 use num_bigint::BigUint;
+use num_traits::Num;
 use opcodes::{AuthOpcode, Opcode};
 use rc4::{
     cipher::InvalidLength,
@@ -358,13 +359,15 @@ pub mod srp6 {
         0x53, 0x08, 0x01, 0xB1, 0x8E, 0xBF, 0xBF, 0x5E, 0x8F, 0xAB, 0x3C, 0x82, 0x87, 0x2A, 0x3E,
         0x9B, 0xB7,
     ];
-    pub const N: LazyLock<BigUint> = LazyLock::new(|| BigUint::from_bytes_le(&N_BYTES));
+
+    pub const N: LazyLock<BigUint> = LazyLock::new(|| BigUint::from_bytes_be(&N_BYTES));
 }
 
 impl AuthClientProof {
     // static Verifier CalculateVerifier(std::string const& username, std::string const& password, Salt const& salt);
     // static EphemeralKey _B(BigNumber const& b, BigNumber const& v) { return ((_g.ModExp(b, _N) + (v * 3)) % N).ToByteArray<EPHEMERAL_KEY_LENGTH>(); }
 
+    #[allow(non_snake_case)]
     pub fn verify(
         &self,
         auth_response: &AuthResponse,
@@ -372,32 +375,59 @@ impl AuthClientProof {
         verifier: &Verifier,
         username_upper: &str,
     ) -> Result<SessionKey, ProtocolError> {
-        use srp6::N;
-        let s = BigUint::from_bytes_le(salt);
+        let As = "1e707e2c2b994cbd8750f7e70232239b3a46c8d0f85c8cff163b8c403cd94b20";
+        let Bs = "4a07f2766d971451a2b716fa69530d7d583f82edd23b116c7e34ca21c7a6ed3e";
+
+        let _bs = "F590ADFDFB7BB0F1E1C754A6114B2492BD5F252DB023F770B8799322B16ADF35";
+
+        let A = BigUint::from_str_radix(As, 16).unwrap();
+        let Ab = A.to_bytes_be();
+        let B = BigUint::from_str_radix(Bs, 16).unwrap();
+        let Bb = B.to_bytes_be();
+
+        let _b = BigUint::from_str_radix(_bs, 16).unwrap();
+
         let v = BigUint::from_bytes_le(verifier);
 
         let one = BigUint::from(1u32);
-        let iA = BigUint::from_bytes_le(&self.A);
-        if iA.modpow(&one, &*srp6::N) == BigUint::ZERO {
-            return Err(ProtocolError::AuthenticationError(format!("bad iA {iA}")));
+        if A.modpow(&one, &srp6::N) == BigUint::ZERO {
+            return Err(ProtocolError::AuthenticationError(format!("bad A {A}")));
         }
-        // BigNumber const u(SHA1::GetDigestOf(A, B));
-        let u = BigUint::from_bytes_le(&sha1_hash_iter(
-            self.A.iter().chain(auth_response.B.iter()).copied(),
-        ));
+        let uhash = sha1_hash_iter(Ab.iter().chain(Bb.iter()).copied());
+        println!("uhash {:X?}", uhash);
+        let u = BigUint::from_bytes_be(&uhash);
 
-        let s = (iA * (v.modpow(&u, &N))).modpow(&u, &N);
-        let s_bytes = to_zero_padded_array::<32>(&s.to_bytes_le());
-        let (s_even, s_odd) = partition(&s_bytes);
+        let S = (&A * (v.modpow(&u, &srp6::N))).modpow(&_b, &srp6::N);
+        println!("S_bytes_be: {:X?}", S.to_bytes_be());
+        let S_bytes = to_zero_padded_array::<32>(&S.to_bytes_be());
+        let (s_even, s_odd) = partition(&S_bytes);
         let session_key: SessionKey =
             to_zero_padded_array(&interleave(&sha1_hash(s_even), &sha1_hash(s_odd))?);
 
-        dbg!(&session_key);
+        println!("Ab: {:X?}", Ab);
+        println!("Bb: {:X?}", Bb);
+        println!("S: {:X?}", S_bytes);
 
-        let Nhash = sha1_hash(auth_response.N);
+        println!("u: {:X?}", u.to_bytes_le());
+        println!("v: {:X?}", v.to_bytes_le());
+        println!("salt: {:X?}", salt);
+        println!("K: {:X?}", session_key);
+        println!("N: {:X?}", auth_response.N);
+
+        let Nhash = sha1_hash_iter(auth_response.N.iter().copied().rev());
         let ghash = sha1_hash(auth_response.g);
 
-        let Ng_hash: Vec<u8> = Nhash.into_iter().zip(ghash).map(|(n, g)| n ^ g).collect();
+        let Ng_hash: Vec<u8> = Nhash
+            .clone()
+            .into_iter()
+            .zip(ghash)
+            .map(|(n, g)| n ^ g)
+            .collect();
+
+        println!(
+            "Nhash: {:X?}\nghash: {:X?}\nNg_hash: {:X?}",
+            Nhash, ghash, Ng_hash
+        );
 
         // // NgHash = H(N) xor H(g)
         // SHA1::Digest const NHash = SHA1::GetDigestOf(N);
@@ -405,13 +435,16 @@ impl AuthClientProof {
         // SHA1::Digest NgHash;
         // std::transform(NHash.begin(), NHash.end(), gHash.begin(), NgHash.begin(), std::bit_xor<>());
 
+        let _I = sha1_hash(username_upper.as_bytes());
+        println!("_I: {:X?}", _I);
+
         let our_M = sha1_hash_iter(
             (Ng_hash
                 .iter()
-                .chain(username_upper.as_bytes())
+                .chain(_I.iter())
                 .chain(salt.iter())
-                .chain(self.A.iter())
-                .chain(auth_response.B.iter())
+                .chain(A.to_bytes_le().iter())
+                .chain(B.to_bytes_le().iter())
                 .chain(session_key.iter()))
             .copied(),
         );

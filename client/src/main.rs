@@ -419,7 +419,7 @@ async fn main() -> WowCliResult<()> {
             .await
             .map_err(|e| WowCliError::LoginFailed)?
         {
-            println!("got authresponse {auth_response:?}");
+            println!("got authresponse {:X?}", auth_response);
             if auth_response.opcode != commands::AUTH_LOGON_CHALLENGE
                 || auth_response.u1 != 0x0
                 || auth_response.u2 != 0x0
