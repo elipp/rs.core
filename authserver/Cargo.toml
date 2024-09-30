@@ -2,13 +2,22 @@
 name = "authserver"
 version = "0.1.0"
 edition = "2021"
+default-run = "authserver"
 
 [dependencies]
-bytemuck = { version = "1.18.0", features = ["derive"] }
 tokio = { version="1", features=["full"] }
 client = { path="../client" }
 rand = { version = "0.8.5", features = ["min_const_gen"] }
-zerocopy = { version = "0.7.35", features = ["byteorder", "derive"] }
-tokio-postgres = "0.7.12"
-deadpool-postgres = "0.14.0"
-num-bigint = "0.4.6"
+zerocopy = { version = "0", features = ["byteorder", "derive"] }
+tokio-postgres = "0"
+deadpool-postgres = "0"
+num-bigint = "0"
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+path = "src/utils/add_account.rs"
+name = "add_account"
+
+[[bin]]
+path = "src/main.rs"
+name = "authserver"

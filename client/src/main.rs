@@ -1,13 +1,16 @@
 use client::{
-    commands, sha1_hash, sha1_hash_iter, sha1_hmac, vec_to_zero_padded_array, AuthClientProof,
-    AuthServerProof, AuthResponse, SessionKey, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY,
+    commands, interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array,
+    AuthChallenge, AuthClientProof, AuthResponse, AuthServerProof, ProtocolError,
+    RealmAuthChallenge, RealmListResult, SessionKey, WowProtoPacket, WowRawPacket, WowRc4,
+    WOTLK_BUILD, WOTLK_VERSION, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
 };
 use num_bigint::BigUint;
 use num_traits::Zero;
+use opcodes::Opcode;
 use rand::Rng;
 use std::io::prelude::*;
 use std::mem::{size_of, MaybeUninit};
-use std::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::AsBytes;
 
 use rc4::{Key, Rc4, StreamCipher};
@@ -23,10 +26,11 @@ const REALMSERVER: &str = "127.0.0.1:3724";
 const USERNAME: &str = "tlipp";
 const PASSWORD: &str = "kuusysi69"; // lol these are case-insensitive apparently
 
-const CLIENTINFO: &[u8] = b"enUS\0Win\0x86";
+const CLIENTINFO: [u8; 12] = *b"enUS\0Win\0x86";
+const CLIENTINFO_REVERSED: [u8; 12] = *b"68x\0niW\0SUne";
 
 const BUILD: u16 = 12340;
-const VERSION: &[u8] = &[3, 3, 5];
+const VERSION: [u8; 3] = [3, 3, 5];
 
 // const VERSION: &[u8] = &[2, 4, 3];
 // const BUILD: u16 = 8606;
@@ -44,7 +48,9 @@ enum WowCliError {
     RealmIsOffline,
     UnexpectedOpcode(u16),
     CryptoInvalidLength(crypto::common::InvalidLength),
+    NetworkError,
     OtherError(String),
+    ProtocolError(ProtocolError),
 }
 
 fn reversed<T: Clone>(arg: &[T]) -> Vec<T> {
@@ -55,22 +61,37 @@ fn reversed<T: Clone>(arg: &[T]) -> Vec<T> {
 
 type WowCliResult<T> = Result<T, WowCliError>;
 
-fn get_auth_challenge(username: &str) -> WowCliResult<Vec<u8>> {
-    let mut buf = Vec::<u8>::new();
-    buf.push(0x00);
-    buf.push(0x06);
-    buf.extend(((username.len() + 30) as u16).to_le_bytes());
-    buf.extend(b"WoW\0".as_slice());
-    buf.extend(VERSION);
-    buf.extend(BUILD.to_le_bytes());
-    buf.extend(reversed(CLIENTINFO));
-    buf.extend((0x78 as u32).to_le_bytes()); // timezone bias
-    buf.extend((0x6401A8C0 as u32).to_le_bytes()); // ip, 192.168.1.100
-    buf.push(username.len() as u8);
-    buf.extend(username.to_uppercase().into_bytes());
-    println!("{buf:?}");
-    Ok(buf)
+fn new_auth_challenge(username: &str) -> (AuthChallenge, Vec<u8>) {
+    let res = AuthChallenge {
+        magic: WOW_MAGIC.to_owned(),
+        version: WOTLK_VERSION.to_owned(),
+        build: WOTLK_BUILD.to_owned(),
+        client_info_reversed: CLIENTINFO_REVERSED.to_owned(),
+        timezone: 0x78,
+        ip: 0x6401A8C0,
+        username_len: username
+            .len()
+            .try_into()
+            .expect("username length to fit u16"),
+    };
+    (res, username.to_uppercase().into_bytes())
 }
+
+// fn get_auth_challenge(username: &str) -> WowCliResult<Vec<u8>> {
+//     let mut buf = Vec::<u8>::new();
+//     buf.push(0x00);
+//     buf.push(0x06);
+//     buf.extend(((username.len() + 30) as u16).to_le_bytes());
+//     buf.extend(b"WoW\0".as_slice());
+//     buf.extend(VERSION);
+//     buf.extend(BUILD.to_le_bytes());
+//     buf.extend(reversed(CLIENTINFO));
+//     buf.extend((0x78 as u32).to_le_bytes()); // timezone bias
+//     buf.extend((0x6401A8C0 as u32).to_le_bytes()); // ip, 192.168.1.100
+//     buf.push(username.len() as u8);
+//     buf.extend(username.to_uppercase().into_bytes());
+//     Ok(buf)
+// }
 
 impl From<std::io::Error> for WowCliError {
     fn from(err: std::io::Error) -> Self {
@@ -78,33 +99,7 @@ impl From<std::io::Error> for WowCliError {
     }
 }
 
-fn interleave<T: Copy>(a: &[T], b: &[T]) -> WowCliResult<Vec<T>> {
-    if a.len() != b.len() {
-        return Err(WowCliError::OtherError(
-            "interleave: a.len() != b.len()".to_owned(),
-        ));
-    }
-    let mut res = Vec::with_capacity(a.len() * 2);
-    for i in 0..a.len() {
-        res.push(a[i]);
-        res.push(b[i]);
-    }
-    Ok(res)
-}
-
-fn partition<T: Copy>(s: &[T]) -> (Vec<T>, Vec<T>) {
-    assert_eq!(s.len() % 2, 0);
-    let half_len = s.len() / 2;
-    let mut a = Vec::with_capacity(half_len);
-    let mut b = Vec::with_capacity(half_len);
-    for i in 0..half_len {
-        a.push(s[2 * i]);
-        b.push(s[2 * i + 1]);
-    }
-    (a, b)
-}
-
-fn calculate_proof_SRP(auth: AuthResponse) -> WowCliResult<(AuthClientProof, SessionKey)> {
+fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, SessionKey)> {
     let B = BigUint::from_bytes_le(&auth.B);
     let g = BigUint::from_bytes_le(&auth.g);
     let N = BigUint::from_bytes_le(&auth.N);
@@ -130,15 +125,15 @@ fn calculate_proof_SRP(auth: AuthResponse) -> WowCliResult<(AuthClientProof, Ses
             break;
         }
     }
-    let A_bytes = vec_to_zero_padded_array::<32>(&A.to_bytes_le());
-    let B_bytes = vec_to_zero_padded_array::<32>(&B.to_bytes_le());
+    let A_bytes = to_zero_padded_array::<32>(&A.to_bytes_le());
+    let B_bytes = to_zero_padded_array::<32>(&B.to_bytes_le());
 
     let u = BigUint::from_bytes_le(&sha1_hash_iter(
         A_bytes.iter().chain(B_bytes.iter()).copied(),
     ));
 
     let S = (&B + (k * (&N - g.modpow(&x, &N))) % &N).modpow(&(&a + (&u * &x)), &N);
-    let s_bytes = vec_to_zero_padded_array::<32>(&S.to_bytes_le());
+    let s_bytes = to_zero_padded_array::<32>(&S.to_bytes_le());
     let (s_even, s_odd) = partition(&s_bytes);
     let session_key = interleave(&sha1_hash(s_even), &sha1_hash(s_odd))?;
     let Nhash = sha1_hash(auth.N);
@@ -188,15 +183,6 @@ fn read_byte<R: std::io::Read>(stream: &mut R) -> WowCliResult<u8> {
 }
 
 #[derive(Debug)]
-#[repr(packed)]
-struct RealmListResult {
-    cmd: u8,
-    packet_size: u16,
-    _unused: u32,
-    num_realms: u16,
-}
-
-#[derive(Debug)]
 struct Realm {
     r#type: u8,
     lock: u8,
@@ -213,17 +199,6 @@ impl Realm {
     fn online(&self) -> bool {
         self.flags & 0x2 == 0
     }
-}
-
-#[derive(Debug)]
-#[repr(packed)]
-struct RealmAuthChallenge {
-    header: u16,
-    opcode: u16,
-    one: u32,
-    seed: u32,
-    seed1: [u8; 16],
-    seed2: [u8; 16],
 }
 
 fn read_chunk<S: std::io::Read, const N: usize>(stream: &mut S) -> WowCliResult<Vec<u8>> {
@@ -257,31 +232,39 @@ fn read_until_null<R: Read>(reader: &mut R) -> WowCliResult<Vec<u8>> {
     Ok(data)
 }
 
-fn request_realmlist<S: std::io::Read + std::io::Write>(
-    stream: &mut S,
-) -> WowCliResult<Vec<Realm>> {
-    stream.write_all(&[commands::CMD_REALM_LIST, 0x0, 0x0, 0x0, 0x0])?;
-    let realmlist: RealmListResult = unsafe { read_as(stream) }?;
-    let rest_of_bytes = read_chunk::<_, 4096>(stream)?;
-    let mut cursor = std::io::Cursor::new(rest_of_bytes);
-    let mut realms = Vec::new();
-    for _ in 0..realmlist.num_realms {
-        unsafe {
-            realms.push(Realm {
-                r#type: read_as(&mut cursor)?,
-                lock: read_as(&mut cursor)?,
-                flags: read_as(&mut cursor)?,
-                name: String::from_utf8_lossy(&read_until_null(&mut cursor)?).to_string(),
-                address: String::from_utf8_lossy(&read_until_null(&mut cursor)?).to_string(),
-                poplevel: read_as(&mut cursor)?,
-                num_chars: read_as(&mut cursor)?,
-                timezone: read_as(&mut cursor)?,
-                _unk1: read_as(&mut cursor)?,
-            });
-        }
-    }
-    Ok(realms)
+struct RequestRealmlist {
+    cmd: u8,
 }
+
+// async fn request_realmlist<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+//     stream: &mut S,
+// ) -> WowCliResult<Vec<Realm>> {
+//     let mut buf = vec![0u8; 1024];
+//     stream
+//         .write_all(&[commands::CMD_REALM_LIST, 0x0, 0x0, 0x0, 0x0])
+//         .await
+//         .map_err(|e| WowCliError::NetworkError)?;
+//     let realmlist = RealmListResult::read_as_wowprotopacket(&mut stream, &mut buf);
+//     let rest_of_bytes = read_chunk::<_, 4096>(stream)?;
+//     let mut cursor = std::io::Cursor::new(rest_of_bytes);
+//     let mut realms = Vec::new();
+//     for _ in 0..realmlist.num_realms {
+//         unsafe {
+//             realms.push(Realm {
+//                 r#type: read_as(&mut cursor)?,
+//                 lock: read_as(&mut cursor)?,
+//                 flags: read_as(&mut cursor)?,
+//                 name: String::from_utf8_lossy(&read_until_null(&mut cursor)?).to_string(),
+//                 address: String::from_utf8_lossy(&read_until_null(&mut cursor)?).to_string(),
+//                 poplevel: read_as(&mut cursor)?,
+//                 num_chars: read_as(&mut cursor)?,
+//                 timezone: read_as(&mut cursor)?,
+//                 _unk1: read_as(&mut cursor)?,
+//             });
+//         }
+//     }
+//     Ok(realms)
+// }
 
 #[derive(Debug)]
 struct ClientPacketHeader {
@@ -289,7 +272,7 @@ struct ClientPacketHeader {
 }
 
 impl ClientPacketHeader {
-    fn new(cmd: u16, length: usize) -> Self {
+    fn new(cmd: Opcode, length: usize) -> Self {
         let mut bytes = [0u8; 6];
         bytes[..2].copy_from_slice(&((length + 4) as u16).to_be_bytes());
         bytes[2..].copy_from_slice(&(cmd as u32).to_le_bytes());
@@ -315,7 +298,7 @@ fn get_auth_session(
 ) -> WowCliResult<Vec<u8>> {
     let username_upper = username.to_uppercase();
     let mut res = Vec::new();
-    let header = ClientPacketHeader::new(opcodes::CMSG_AUTH_SESSION, 0x3D + username.len());
+    let header = ClientPacketHeader::new(opcodes::Opcode::CMSG_AUTH_SESSION, 0x3D + username.len());
     res.extend(header.bytes);
     res.extend((BUILD as u32).to_le_bytes());
     res.extend([0; 4]);
@@ -376,7 +359,7 @@ impl std::fmt::Display for ServerPacketHeader {
         write!(
             f,
             "ServerPacketHeader {{ opcode: {} (0x{:X}), packet_length: {} }}",
-            OPCODE_NAME_MAP
+            (*OPCODE_NAME_MAP)
                 .get(&self.opcode)
                 .unwrap_or(&"UNKNOWN_OPCODE"),
             self.opcode,
@@ -410,26 +393,62 @@ fn decrypt_header(buf: &mut [u8], decrypt: &mut WowRc4) -> ServerPacketHeader {
     }
 }
 
-fn main() -> WowCliResult<()> {
-    let (realms, session_key) = {
-        let mut stream = TcpStream::connect(REALMSERVER)?;
-        let challenge = get_auth_challenge(USERNAME)?;
-        stream.write_all(&challenge[..])?;
-        let auth: AuthResponse = unsafe { read_as(&mut stream) }?;
-        if auth.opcode != commands::AUTH_LOGON_CHALLENGE || auth.u1 != 0x0 || auth.u2 != 0x0 {
-            return Err(WowCliError::UnexpectedResponse);
-        }
-        let (proof, session_key) = calculate_proof_SRP(auth)?;
-        stream.write_all(proof.as_bytes())?;
-        let server_proof: AuthServerProof = unsafe { read_as(&mut stream) }?;
+impl From<ProtocolError> for WowCliError {
+    fn from(e: ProtocolError) -> Self {
+        Self::ProtocolError(e)
+    }
+}
 
-        if server_proof.cmd == commands::AUTH_LOGON_PROOF && server_proof.error == 0x0 {
-            println!("login at {} as {} successful!", REALMSERVER, USERNAME);
+#[tokio::main]
+async fn main() -> WowCliResult<()> {
+    let mut buf = vec![0; 1024];
+    let (realms, session_key): (Vec<Realm>, _) = {
+        let mut stream = tokio::net::TcpStream::connect(REALMSERVER).await?;
+        let (challenge, username_upper) = new_auth_challenge(USERNAME);
+        challenge
+            .write_as_wowprotopacket(
+                (AuthChallenge::SIZE_WITHOUT_HEADER + username_upper.len())
+                    .try_into()
+                    .expect("username length to fit u16"),
+                &mut stream,
+                Some(&username_upper),
+            )
+            .await?;
+
+        if let (Some(auth_response), _) = AuthResponse::read_as_rawpacket(&mut stream, &mut buf)
+            .await
+            .map_err(|e| WowCliError::LoginFailed)?
+        {
+            println!("got authresponse {auth_response:?}");
+            if auth_response.opcode != commands::AUTH_LOGON_CHALLENGE
+                || auth_response.u1 != 0x0
+                || auth_response.u2 != 0x0
+            {
+                return Err(WowCliError::UnexpectedResponse);
+            }
+
+            let (proof, session_key) = calculate_proof_SRP(auth_response)?;
+            stream.write_all(proof.as_bytes()).await?;
+            println!("sent client proof {proof:?}");
+            if let (Some(server_proof), _) =
+                AuthServerProof::read_as_rawpacket(&mut stream, &mut buf).await?
+            {
+                println!("got server proof {server_proof:?}");
+                if server_proof.cmd == commands::AUTH_LOGON_PROOF && server_proof.error == 0x0 {
+                    println!("login at {} as {} successful!", REALMSERVER, USERNAME);
+                } else {
+                    return Err(WowCliError::LoginFailed);
+                }
+
+                (vec![], session_key)
+            } else {
+                eprintln!("AuthServerProof failed");
+                return Err(WowCliError::LoginFailed);
+            }
         } else {
+            eprintln!("AuthResponse failed");
             return Err(WowCliError::LoginFailed);
         }
-
-        (request_realmlist(&mut stream)?, session_key)
     };
 
     dbg!(&realms);
@@ -439,24 +458,27 @@ fn main() -> WowCliResult<()> {
             println!("realm {} is offline, not connecting!", realm.name);
             return Err(WowCliError::RealmIsOffline);
         }
-        let mut stream = TcpStream::connect(&realm.address)?;
-        let realm_auth_challenge: RealmAuthChallenge = unsafe { read_as(&mut stream) }?;
-        if realm_auth_challenge.opcode != opcodes::SMSG_AUTH_CHALLENGE {
-            return Err(WowCliError::UnexpectedOpcode(realm_auth_challenge.opcode));
-        }
-        let auth_session = get_auth_session(USERNAME, &session_key, &realm_auth_challenge)?;
-        stream.write_all(&auth_session)?;
-        let (mut encrypt, mut decrypt) = init_crypto(&session_key)?;
-        let mut read_buf = [0; 4096];
-        loop {
-            let bytes = stream.read(&mut read_buf)?;
-            let mut processed: usize = 0;
-            while processed < bytes {
-                let packet_header = decrypt_header(&mut read_buf[processed..], &mut decrypt);
-                println!("{packet_header} (read {}/{} bytes)", processed, bytes);
-                processed += packet_header.content_length + packet_header.header_length - 2;
+        let mut stream = tokio::net::TcpStream::connect(&realm.address).await?;
+        if let (Some(realm_auth_challenge), _) =
+            RealmAuthChallenge::read_as_wowprotopacket(&mut stream, &mut buf)
+                .await
+                .map_err(|e| WowCliError::NetworkError)?
+        {
+            let auth_session = get_auth_session(USERNAME, &session_key, &realm_auth_challenge)?;
+            stream.write_all(&auth_session).await?;
+            let (mut encrypt, mut decrypt) = init_crypto(&session_key)?;
+            let mut read_buf = [0; 4096];
+            loop {
+                // TODO: fix
+                // let bytes = stream.read(&mut read_buf)?;
+                // let mut processed: usize = 0;
+                // while processed < bytes {
+                //     let packet_header = decrypt_header(&mut read_buf[processed..], &mut decrypt);
+                //     println!("{packet_header} (read {}/{} bytes)", processed, bytes);
+                //     processed += packet_header.content_length + packet_header.header_length - 2;
+                // }
+                // std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
 

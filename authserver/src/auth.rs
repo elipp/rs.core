@@ -1,4 +1,4 @@
-use client::ProtocolError;
+use client::{ProtocolError, Verifier};
 use num_bigint::BigUint;
 
 #[allow(dead_code)]
@@ -60,30 +60,4 @@ pub enum ExpansionFlags {
     PostBcExpFlag = 0x2,
     PreBcExpFlag = 0x1,
     NoValidExpFlag = 0x0,
-}
-
-#[derive(Debug)]
-struct Account {
-    id: i32,
-    username: String,
-    salt: BigUint,     //[u8; 20],
-    verifier: BigUint, // [u8; 20],
-    gmlevel: u32,
-    active: bool,
-}
-
-impl TryFrom<tokio_postgres::Row> for Account {
-    type Error = ProtocolError;
-    fn try_from(r: tokio_postgres::Row) -> Result<Self, Self::Error> {
-        let salt: Vec<u8> = r.get(2);
-        let verifier: Vec<u8> = r.get(3);
-        Ok(Self {
-            id: r.get(0),
-            username: r.get(1),
-            salt: BigUint::from_bytes_le(&salt),
-            verifier: BigUint::from_bytes_le(&verifier),
-            gmlevel: r.get(4),
-            active: r.get(5),
-        })
-    }
 }

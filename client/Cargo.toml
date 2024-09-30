@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bytemuck = { version = "1", features = ["derive"] }
 crypto = "0"
 crypto-bigint = "0"
 hmac = "0"
@@ -15,8 +14,8 @@ num-traits = "0"
 rand = { version = "0.8.5", features = ["min_const_gen"] }
 rc4 = "0"
 sha1 = "0"
-tokio = "1.40.0"
-zerocopy = { version = "0.7.35", features = ["byteorder", "derive"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+zerocopy = { version = "0", features = ["byteorder", "derive"] }
 
 [[bin]]
 name = "client"
