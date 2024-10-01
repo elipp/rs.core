@@ -48,7 +48,7 @@ pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> AuthResponse {
     use srp6::{g, N};
     let _b = generate_random_bytes::<32>();
     let b = BigUint::from_bytes_le(&_b);
-    let v = BigUint::from_bytes_le(verifier);
+    let v = BigUint::from_bytes_be(verifier);
     let three = BigUint::from(3u32);
 
     let B = (g.modpow(&b, &N) + (v * three)) % &*N;

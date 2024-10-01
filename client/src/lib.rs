@@ -375,15 +375,14 @@ impl AuthClientProof {
         verifier: &Verifier,
         username_upper: &str,
     ) -> Result<SessionKey, ProtocolError> {
-        let As = "1e707e2c2b994cbd8750f7e70232239b3a46c8d0f85c8cff163b8c403cd94b20";
-        let Bs = "4a07f2766d971451a2b716fa69530d7d583f82edd23b116c7e34ca21c7a6ed3e";
-
-        let _bs = "F590ADFDFB7BB0F1E1C754A6114B2492BD5F252DB023F770B8799322B16ADF35";
+        let As = "793f48bbec19e84b31263709474326ba935b06735ad3b4dd832cb2b57ed65ed2";
+        let Bs = "0be4fd510983c89fad2f8f855079ec8052c83df86f98f02c36d65c36db94e65b";
+        let _bs = "483A8AC973858E76B35BD512422E13642477707EF13EC27A891B29057A582A0D";
 
         let A = BigUint::from_str_radix(As, 16).unwrap();
-        let Ab = A.to_bytes_be();
+        let Ab = A.to_bytes_le();
         let B = BigUint::from_str_radix(Bs, 16).unwrap();
-        let Bb = B.to_bytes_be();
+        let Bb = B.to_bytes_le();
 
         let _b = BigUint::from_str_radix(_bs, 16).unwrap();
 
@@ -394,8 +393,8 @@ impl AuthClientProof {
             return Err(ProtocolError::AuthenticationError(format!("bad A {A}")));
         }
         let uhash = sha1_hash_iter(Ab.iter().chain(Bb.iter()).copied());
-        println!("uhash {:X?}", uhash);
-        let u = BigUint::from_bytes_be(&uhash);
+        println!("ABhash {:X?}", uhash);
+        let u = BigUint::from_bytes_le(&uhash);
 
         let S = (&A * (v.modpow(&u, &srp6::N))).modpow(&_b, &srp6::N);
         println!("S_bytes_be: {:X?}", S.to_bytes_be());

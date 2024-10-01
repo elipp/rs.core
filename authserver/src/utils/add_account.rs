@@ -32,7 +32,7 @@ pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> 
     use client::srp6::{g, N};
     let creds = format!("{}:{}", username_upper, password.to_ascii_uppercase());
 
-    let xb = BigUint::from_bytes_le(&sha1_hash_iter(
+    let xb = BigUint::from_bytes_be(&sha1_hash_iter(
         salt.iter().copied().chain(sha1_hash(creds)),
     ));
     let v = g.modpow(&xb, &N);
