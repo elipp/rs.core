@@ -14,6 +14,7 @@ use rc4::{
 use sha1::{Digest, Sha1};
 
 use rand::Rng;
+use srp6::N_BYTES_LE;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use zerocopy::byteorder::network_endian;
 use zerocopy::{AsBytes, FromBytes, FromZeroes, Unaligned};
@@ -46,7 +47,7 @@ pub fn partition<T: Copy>(s: &[T]) -> (Vec<T>, Vec<T>) {
     (a, b)
 }
 
-pub fn to_zero_padded_array<const N: usize>(vec: &[u8]) -> [u8; N] {
+pub fn to_zero_padded_array_le<const N: usize>(vec: &[u8]) -> [u8; N] {
     assert!(vec.len() <= N);
 
     let mut array = [0u8; N];
@@ -61,14 +62,14 @@ pub fn sha1_hash<D: AsRef<[u8]>>(data: D) -> [u8; SHA_DIGEST_LENGTH] {
     let mut sha1 = Sha1::new();
     sha1.update(data);
     let hash = sha1.finalize();
-    to_zero_padded_array(&hash)
+    to_zero_padded_array_le(&hash)
 }
 
 pub fn sha1_hmac(key: &[u8], data: &[u8]) -> Result<[u8; SHA_DIGEST_LENGTH], InvalidLength> {
     let mut hmac = Hmac::<Sha1>::new_from_slice(key)?;
     hmac.update(data);
     let encrypt_digest = hmac.finalize();
-    Ok(to_zero_padded_array(&encrypt_digest.into_bytes()))
+    Ok(to_zero_padded_array_le(&encrypt_digest.into_bytes()))
 }
 
 pub fn sha1_hash_iter<D: Iterator<Item = u8>>(data: D) -> Vec<u8> {
@@ -349,18 +350,19 @@ impl WowRawPacket for AuthClientProof {}
 #[allow(non_upper_case_globals)]
 pub mod srp6 {
     use num_bigint::BigUint;
+    use num_traits::Num;
     use std::sync::LazyLock;
 
     pub const _g: u8 = 0x7;
     pub const g: LazyLock<BigUint> = LazyLock::new(|| BigUint::from_bytes_be(&[_g]));
 
-    pub const N_BYTES: [u8; 32] = [
-        0x89, 0x4B, 0x64, 0x5E, 0x89, 0xE1, 0x53, 0x5B, 0xBD, 0xAD, 0x5B, 0x8B, 0x29, 0x06, 0x50,
-        0x53, 0x08, 0x01, 0xB1, 0x8E, 0xBF, 0xBF, 0x5E, 0x8F, 0xAB, 0x3C, 0x82, 0x87, 0x2A, 0x3E,
-        0x9B, 0xB7,
-    ];
+    const N_str: &str = "894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7";
+    pub const N: LazyLock<BigUint> = LazyLock::new(|| BigUint::from_str_radix(&N_str, 16).unwrap());
+    pub const N_BYTES_BE: LazyLock<[u8; 32]> =
+        LazyLock::new(|| N.to_bytes_be().try_into().unwrap());
 
-    pub const N: LazyLock<BigUint> = LazyLock::new(|| BigUint::from_bytes_be(&N_BYTES));
+    pub const N_BYTES_LE: LazyLock<[u8; 32]> =
+        LazyLock::new(|| N.to_bytes_le().try_into().unwrap());
 }
 
 impl AuthClientProof {
@@ -370,83 +372,70 @@ impl AuthClientProof {
     #[allow(non_snake_case)]
     pub fn verify(
         &self,
-        auth_response: &AuthResponse,
         salt: &Salt,
         verifier: &Verifier,
         username_upper: &str,
     ) -> Result<SessionKey, ProtocolError> {
-        let As = "793f48bbec19e84b31263709474326ba935b06735ad3b4dd832cb2b57ed65ed2";
-        let Bs = "0be4fd510983c89fad2f8f855079ec8052c83df86f98f02c36d65c36db94e65b";
-        let _bs = "483A8AC973858E76B35BD512422E13642477707EF13EC27A891B29057A582A0D";
+        use srp6::{g, N};
 
-        let A = BigUint::from_str_radix(As, 16).unwrap();
-        let Ab = A.to_bytes_le();
-        let B = BigUint::from_str_radix(Bs, 16).unwrap();
-        let Bb = B.to_bytes_le();
+        let _b_bytes = generate_random_bytes::<32>();
+        let _b = BigUint::from_bytes_le(&_b_bytes);
 
-        let _b = BigUint::from_str_radix(_bs, 16).unwrap();
+        let A = BigUint::from_bytes_be(&self.A);
 
-        let v = BigUint::from_bytes_le(verifier);
+        let s = BigUint::from_bytes_be(salt);
+        let v = BigUint::from_bytes_be(verifier);
 
-        let one = BigUint::from(1u32);
-        if A.modpow(&one, &srp6::N) == BigUint::ZERO {
-            return Err(ProtocolError::AuthenticationError(format!("bad A {A}")));
+        println!("{s:X?} {v:X?}");
+
+        assert_ne!(&A % &*N, BigUint::ZERO);
+        if &A % &*N == BigUint::ZERO {
+            eprintln!("wrong A");
+            return Err(ProtocolError::AuthenticationError(format!("Lol.")));
         }
-        let uhash = sha1_hash_iter(Ab.iter().chain(Bb.iter()).copied());
-        println!("ABhash {:X?}", uhash);
-        let u = BigUint::from_bytes_le(&uhash);
 
-        let S = (&A * (v.modpow(&u, &srp6::N))).modpow(&_b, &srp6::N);
-        println!("S_bytes_be: {:X?}", S.to_bytes_be());
-        let S_bytes = to_zero_padded_array::<32>(&S.to_bytes_be());
-        let (s_even, s_odd) = partition(&S_bytes);
-        let session_key: SessionKey =
-            to_zero_padded_array(&interleave(&sha1_hash(s_even), &sha1_hash(s_odd))?);
+        let three = BigUint::from(3u32);
+        let B = (g.modpow(&_b, &N) + (&v * &three)) % &*N;
 
-        println!("Ab: {:X?}", Ab);
-        println!("Bb: {:X?}", Bb);
-        println!("S: {:X?}", S_bytes);
-
-        println!("u: {:X?}", u.to_bytes_le());
-        println!("v: {:X?}", v.to_bytes_le());
-        println!("salt: {:X?}", salt);
-        println!("K: {:X?}", session_key);
-        println!("N: {:X?}", auth_response.N);
-
-        let Nhash = sha1_hash_iter(auth_response.N.iter().copied().rev());
-        let ghash = sha1_hash(auth_response.g);
-
-        let Ng_hash: Vec<u8> = Nhash
-            .clone()
-            .into_iter()
-            .zip(ghash)
-            .map(|(n, g)| n ^ g)
-            .collect();
-
-        println!(
-            "Nhash: {:X?}\nghash: {:X?}\nNg_hash: {:X?}",
-            Nhash, ghash, Ng_hash
+        let ABhash = sha1_hash_iter(
+            A.to_bytes_le()
+                .into_iter()
+                .chain(B.to_bytes_le().into_iter()),
         );
 
-        // // NgHash = H(N) xor H(g)
-        // SHA1::Digest const NHash = SHA1::GetDigestOf(N);
-        // SHA1::Digest const gHash = SHA1::GetDigestOf(g);
-        // SHA1::Digest NgHash;
-        // std::transform(NHash.begin(), NHash.end(), gHash.begin(), NgHash.begin(), std::bit_xor<>());
+        let u = BigUint::from_bytes_le(&ABhash);
+        let S = (&A * (v.modpow(&u, &N))).modpow(&_b, &N);
+
+        let S_bytes = to_zero_padded_array_le::<32>(&S.to_bytes_le());
+        let (s_even, s_odd) = partition(&S_bytes);
+        let session_key: SessionKey =
+            to_zero_padded_array_le(&interleave(&sha1_hash(s_even), &sha1_hash(s_odd)).unwrap());
+
+        let g_bytes = g.to_bytes_le();
+        let NHash = sha1_hash(*N_BYTES_LE);
+        let gHash = sha1_hash(g_bytes);
+
+        let NgHash: Vec<u8> = NHash
+            .clone()
+            .into_iter()
+            .zip(gHash)
+            .map(|(_n, _g)| _n ^ _g)
+            .collect();
 
         let _I = sha1_hash(username_upper.as_bytes());
-        println!("_I: {:X?}", _I);
+        let salt_bytes = s.to_bytes_le();
 
         let our_M = sha1_hash_iter(
-            (Ng_hash
+            (NgHash
                 .iter()
                 .chain(_I.iter())
-                .chain(salt.iter())
+                .chain(salt_bytes.iter())
                 .chain(A.to_bytes_le().iter())
                 .chain(B.to_bytes_le().iter())
                 .chain(session_key.iter()))
             .copied(),
         );
+
         if our_M == self.M1 {
             Ok(session_key)
         } else {

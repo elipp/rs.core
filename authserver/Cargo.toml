@@ -13,6 +13,7 @@ tokio-postgres = "0"
 deadpool-postgres = "0"
 num-bigint = "0"
 clap = { version = "4", features = ["derive"] }
+num-traits = "0.2.19"
 
 [[bin]]
 path = "src/utils/add_account.rs"

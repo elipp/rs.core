@@ -1,9 +1,6 @@
-use authserver::Account;
+use authserver::auth::calculate_verifier;
 use clap::Parser;
-use client::{
-    generate_random_bytes, sha1_hash, sha1_hash_iter, to_zero_padded_array, Salt, Verifier,
-};
-use num_bigint::BigUint;
+use client::{generate_random_bytes, Salt, Verifier};
 use tokio_postgres::NoTls;
 
 /// Simple program to greet a person
@@ -26,17 +23,6 @@ pub struct Srp6 {
     login: String,
     salt: Salt,
     verifier: Verifier,
-}
-
-pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> Verifier {
-    use client::srp6::{g, N};
-    let creds = format!("{}:{}", username_upper, password.to_ascii_uppercase());
-
-    let xb = BigUint::from_bytes_be(&sha1_hash_iter(
-        salt.iter().copied().chain(sha1_hash(creds)),
-    ));
-    let v = g.modpow(&xb, &N);
-    to_zero_padded_array(&v.to_bytes_le())
 }
 
 #[derive(Debug)]

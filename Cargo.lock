@@ -85,6 +85,7 @@ dependencies = [
  "client",
  "deadpool-postgres",
  "num-bigint",
+ "num-traits",
  "rand",
  "tokio",
  "tokio-postgres",

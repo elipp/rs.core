@@ -1,10 +1,10 @@
 use client::{
-    generate_random_bytes, srp6, to_zero_padded_array, AuthChallenge, AuthResponse, ProtocolError,
-    Salt, Verifier,
+    generate_random_bytes, srp6, to_zero_padded_array_le, AuthChallenge, AuthResponse,
+    ProtocolError, Salt, Verifier,
 };
 use num_bigint::BigUint;
 
-mod auth;
+pub mod auth;
 
 #[derive(Debug)]
 pub struct Account {
@@ -37,22 +37,15 @@ impl TryFrom<tokio_postgres::Row> for Account {
     }
 }
 
-impl Account {
-    pub fn calculate_verifier(username: &str, password: &str, salt: &str) -> Verifier {
-        let s = format!("{username}:{password}");
-        [0; 32]
-    }
-}
-
 pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> AuthResponse {
     use srp6::{g, N};
     let _b = generate_random_bytes::<32>();
     let b = BigUint::from_bytes_le(&_b);
-    let v = BigUint::from_bytes_be(verifier);
+    let v = BigUint::from_bytes_le(verifier);
     let three = BigUint::from(3u32);
 
     let B = (g.modpow(&b, &N) + (v * three)) % &*N;
-    let B_bytes = to_zero_padded_array::<32>(&B.to_bytes_le());
+    let B_bytes = to_zero_padded_array_le::<32>(&B.to_bytes_le());
 
     AuthResponse {
         opcode: 0x0,
@@ -62,7 +55,7 @@ pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> AuthResponse {
         u3: 0x1,
         g: [srp6::_g],
         u4: 0x32,
-        N: srp6::N_BYTES.to_owned(),
+        N: srp6::N_BYTES_LE.to_owned(),
         salt: salt.to_owned(),
         unk1: generate_random_bytes(),
         securityFlags: 0x0,

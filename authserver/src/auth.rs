@@ -1,4 +1,4 @@
-use client::{ProtocolError, Verifier};
+use client::{sha1_hash, sha1_hash_iter, to_zero_padded_array_le, ProtocolError, Salt, Verifier};
 use num_bigint::BigUint;
 
 #[allow(dead_code)]
@@ -60,4 +60,203 @@ pub enum ExpansionFlags {
     PostBcExpFlag = 0x2,
     PreBcExpFlag = 0x1,
     NoValidExpFlag = 0x0,
+}
+
+pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> Verifier {
+    use client::srp6::{g, N};
+    let creds = format!("{}:{}", username_upper, password.to_ascii_uppercase());
+
+    let xb = BigUint::from_bytes_le(&sha1_hash_iter(
+        salt.iter().copied().chain(sha1_hash(creds)),
+    ));
+    let v = g.modpow(&xb, &N);
+    to_zero_padded_array_le(&v.to_bytes_le())
+}
+
+mod test {
+    use client::{
+        interleave, partition, sha1_hash, sha1_hash_iter,
+        srp6::{self, N_BYTES_LE},
+        to_zero_padded_array_le, SessionKey,
+    };
+    use num_bigint::BigUint;
+    use num_traits::Num;
+    use srp6::{g, N};
+
+    use crate::auth::calculate_verifier;
+
+    fn ah_be<T: AsRef<[u8]>>(v: &T) -> String {
+        BigUint::from_bytes_be(v.as_ref())
+            .to_str_radix(16)
+            .to_lowercase()
+    }
+
+    fn ah_le<T: AsRef<[u8]>>(v: &T) -> String {
+        BigUint::from_bytes_le(v.as_ref())
+            .to_str_radix(16)
+            .to_lowercase()
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_auth() {
+        let As = "5f6b9d567090dad3f92837905a269ef74654bc28cb89616cb9fbe507f408c1b6";
+        let Bs = "87985e249baef9e8a579943f3cf142998b420836a8bc89445cf932322565f70a";
+        let _bs = "84E860000948722DE0A59FA39DCAD920CC396E66FE684B1AE50288B43924A93C";
+
+        let salt = "fe9a4b960df07b07fda99b5b72f75ff514c466fa8dc090ee08388c35b7c528e3";
+        let verifier = "5CDDBD8DB378422A2CF948638A8F38616F102911F14EBDAAD634FD4BACF4BC18";
+
+        let A = BigUint::from_str_radix(As, 16).unwrap();
+        // let Ab = A.to_bytes_be();
+        let B = BigUint::from_str_radix(Bs, 16).unwrap();
+        // let Bb = B.to_bytes_be();
+
+        assert_eq!(&ah_be(&A.to_bytes_be()), As);
+        assert_eq!(&ah_be(&B.to_bytes_be()), Bs);
+
+        let _b = BigUint::from_str_radix(_bs, 16).unwrap();
+
+        let s = BigUint::from_str_radix(salt, 16).unwrap();
+        let v = BigUint::from_str_radix(verifier, 16).unwrap();
+
+        assert_ne!(&A % &*N, BigUint::ZERO);
+
+        let ABhash = sha1_hash_iter(
+            A.to_bytes_le()
+                .into_iter()
+                .chain(B.to_bytes_le().into_iter()),
+        );
+
+        assert_eq!(&ah_le(&ABhash), "a33209b9872e5fce13a7eb5f0f4b180ba6f4d707");
+
+        let u = BigUint::from_bytes_le(&ABhash);
+        let S = (&A * (v.modpow(&u, &N))).modpow(&_b, &N);
+
+        // | vModExpU_N = 50157CADC4E87315F0BFAC91792FD412B27951B07E96D29A79B1054240309AE6
+        // | AvModExpU_N = 1DD9A377D098BB16B6E58C2F63025E5A39BAE8905B5C8251F6E11D7DE00A626CCB789D064F92171844E6674F188A6885D2C459DA00FCACF79976FEF056858584
+        // | final = 2025C04D15B7F228F78711B5D7D8549E753748907D4DBACDBF62AF3E1E9F333C
+
+        let three = BigUint::from(3u32);
+
+        assert_eq!(
+            g.modpow(&_b, &N),
+            BigUint::from_str_radix(
+                "8395EE389508DA2199E8722AEF503A1B4E14F01E544F0D6330D33F5D7304FA30",
+                16
+            )
+            .unwrap()
+        );
+
+        assert_eq!(
+            g.modpow(&_b, &N) + (&v * &three),
+            BigUint::from_str_radix(
+                "019A2F26E1AF71A0A020D44B558EFDE33F9B456B54283B4663B372374079E32E78",
+                16
+            )
+            .unwrap()
+        );
+
+        assert_eq!(
+            (g.modpow(&_b, &N) + (&v * &three) % &*N),
+            BigUint::from_str_radix(
+                "87985E249BAEF9E8A579943F3CF142998B420836A8BC89445CF932322565F70A",
+                16
+            )
+            .unwrap()
+        );
+
+        assert_eq!((g.modpow(&_b, &N) + (&v * &three) % &*N), B);
+
+        let S_bytes = to_zero_padded_array_le::<32>(&S.to_bytes_le());
+        let (s_even, s_odd) = partition(&S_bytes);
+        let session_key: SessionKey =
+            to_zero_padded_array_le(&interleave(&sha1_hash(s_even), &sha1_hash(s_odd)).unwrap());
+
+        assert_eq!(
+            &S.to_str_radix(16),
+            "2025c04d15b7f228f78711b5d7d8549e753748907d4dbacdbf62af3e1e9f333c"
+        );
+
+        assert_eq!(
+            &ah_le(&session_key),
+            "6e0a08c588032c38d9efac9568f81b19ba85ae7ed5ab5088550fdce4ab9ae7d6a509e1bc2c0df253"
+        );
+
+        let g_bytes = g.to_bytes_le();
+        let NHash = sha1_hash(*N_BYTES_LE);
+        let gHash = sha1_hash(g_bytes);
+
+        let NgHash: Vec<u8> = NHash
+            .clone()
+            .into_iter()
+            .zip(gHash)
+            .map(|(_n, _g)| _n ^ _g)
+            .collect();
+
+        assert_eq!(&ah_le(&NHash), "136529087794c76424272695999d0de5d3576080");
+        assert_eq!(&ah_le(&gHash), "b4a75264e15ea8347e5bbe9688eea1dde9e71b5d");
+        assert_eq!(&ah_le(&NgHash), "a7c27b6c96ca6f505a7c98031173ac383ab07bdd");
+
+        let _I = sha1_hash("TLIPP".as_bytes());
+        assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
+
+        let salt_bytes = s.to_bytes_le();
+
+        let our_M = sha1_hash_iter(
+            (NgHash
+                .iter()
+                .chain(_I.iter())
+                .chain(salt_bytes.iter())
+                .chain(A.to_bytes_le().iter())
+                .chain(B.to_bytes_le().iter())
+                .chain(session_key.iter()))
+            .copied(),
+        );
+
+        assert_eq!(&ah_le(&our_M), "d1620cf47d49e65e46433dc3069231ea9c84f2d9");
+        // | _N = 894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7
+        // | u = A33209B9872E5FCE13A7EB5F0F4B180BA6F4D707
+        // | S = 2025c04d15b7f228f78711b5d7d8549e753748907d4dbacdbf62af3e1e9f333c
+        // | NHash = 136529087794c76424272695999d0de5d3576080
+        // | gHash = b4a75264e15ea8347e5bbe9688eea1dde9e71b5d
+        // | NgHash = a7c27b6c96ca6f505a7c98031173ac383ab07bdd
+        // | s (aka salt) = fe9a4b960df07b07fda99b5b72f75ff514c466fa8dc090ee08388c35b7c528e3
+        // | _v = 5CDDBD8DB378422A2CF948638A8F38616F102911F14EBDAAD634FD4BACF4BC18
+        // | _I = 95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a
+        // | _g.ModExp(_b, _N) = 8395EE389508DA2199E8722AEF503A1B4E14F01E544F0D6330D33F5D7304FA30
+        // | _g.ModExp(_b, _N) + (_v * 3) = 019A2F26E1AF71A0A020D44B558EFDE33F9B456B54283B4663B372374079E32E78
+        // | _g.ModExp(_b, _N) + (_v * 3) % N = 87985E249BAEF9E8A579943F3CF142998B420836A8BC89445CF932322565F70A
+        // | A: 5f6b9d567090dad3f92837905a269ef74654bc28cb89616cb9fbe507f408c1b6
+        // | B: 87985e249baef9e8a579943f3cf142998b420836a8bc89445cf932322565f70a
+        // | ABhash: a33209b9872e5fce13a7eb5f0f4b180ba6f4d707
+        // | vModExpU_N = 50157CADC4E87315F0BFAC91792FD412B27951B07E96D29A79B1054240309AE6
+        // | AvModExpU_N = 1DD9A377D098BB16B6E58C2F63025E5A39BAE8905B5C8251F6E11D7DE00A626CCB789D064F92171844E6674F188A6885D2C459DA00FCACF79976FEF056858584
+        // | final = 2025C04D15B7F228F78711B5D7D8549E753748907D4DBACDBF62AF3E1E9F333C
+        // | ourM = d1620cf47d49e65e46433dc3069231ea9c84f2d9
+        // | clientM = d1620cf47d49e65e46433dc3069231ea9c84f2d9
+        // | K = 6e0a08c588032c38d9efac9568f81b19ba85ae7ed5ab5088550fdce4ab9ae7d6a509e1bc2c0df253
+        // | let As = "5f6b9d567090dad3f92837905a269ef74654bc28cb89616cb9fbe507f408c1b6";
+        // | let Bs = "87985e249baef9e8a579943f3cf142998b420836a8bc89445cf932322565f70a";
+        // | let _bs = "84E860000948722DE0A59FA39DCAD920CC396E66FE684B1AE50288B43924A93C";
+    }
+
+    #[test]
+    fn test_verifier() {
+        let salt = BigUint::from_str_radix(
+            "fe9a4b960df07b07fda99b5b72f75ff514c466fa8dc090ee08388c35b7c528e3",
+            16,
+        )
+        .unwrap();
+
+        let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
+
+        let _I = sha1_hash("TLIPP".as_bytes());
+        assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
+        let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
+        assert_eq!(
+            &ah_le(&v),
+            "5cddbd8db378422a2cf948638a8f38616f102911f14ebdaad634fd4bacf4bc18"
+        );
+    }
 }

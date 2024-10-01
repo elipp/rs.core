@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             AuthClientProof::read_as_rawpacket(&mut socket, &mut buf).await?
                         {
                             eprintln!("got client proof {proof:?}");
-                            proof.verify(&response, &account.salt, &account.verifier, &username)?;
+                            proof.verify(&account.salt, &account.verifier, &username)?;
 
                             let server_proof = AuthServerProof {
                                 cmd: commands::AUTH_LOGON_PROOF,

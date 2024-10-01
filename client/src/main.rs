@@ -1,5 +1,5 @@
 use client::{
-    commands, interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array,
+    commands, interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le,
     AuthChallenge, AuthClientProof, AuthResponse, AuthServerProof, ProtocolError,
     RealmAuthChallenge, RealmListResult, SessionKey, WowProtoPacket, WowRawPacket, WowRc4,
     WOTLK_BUILD, WOTLK_VERSION, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
@@ -125,15 +125,15 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
             break;
         }
     }
-    let A_bytes = to_zero_padded_array::<32>(&A.to_bytes_le());
-    let B_bytes = to_zero_padded_array::<32>(&B.to_bytes_le());
+    let A_bytes = to_zero_padded_array_le::<32>(&A.to_bytes_le());
+    let B_bytes = to_zero_padded_array_le::<32>(&B.to_bytes_le());
 
     let u = BigUint::from_bytes_le(&sha1_hash_iter(
         A_bytes.iter().chain(B_bytes.iter()).copied(),
     ));
 
     let S = (&B + (k * (&N - g.modpow(&x, &N))) % &N).modpow(&(&a + (&u * &x)), &N);
-    let s_bytes = to_zero_padded_array::<32>(&S.to_bytes_le());
+    let s_bytes = to_zero_padded_array_le::<32>(&S.to_bytes_le());
     let (s_even, s_odd) = partition(&s_bytes);
     let session_key = interleave(&sha1_hash(s_even), &sha1_hash(s_odd))?;
     let Nhash = sha1_hash(auth.N);
