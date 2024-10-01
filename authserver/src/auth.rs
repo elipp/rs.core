@@ -242,6 +242,9 @@ mod test {
     }
 
     #[test]
+    fn test_auth_response() {}
+
+    #[test]
     fn test_verifier() {
         let salt = BigUint::from_str_radix(
             "fe9a4b960df07b07fda99b5b72f75ff514c466fa8dc090ee08388c35b7c528e3",
