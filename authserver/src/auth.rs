@@ -70,14 +70,14 @@ pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> 
         salt.iter().copied().chain(sha1_hash(creds)),
     ));
     let v = g.modpow(&xb, &N);
-    to_zero_padded_array_le(&v.to_bytes_le())
+    to_zero_padded_array_le(&v.to_bytes_be()) // TODO le/be confusion
 }
 
 mod test {
     use client::{
         interleave, partition, sha1_hash, sha1_hash_iter,
         srp6::{self, N_BYTES_LE},
-        to_zero_padded_array_le, SessionKey,
+        to_zero_padded_array_le, AuthResponse, Salt, SessionKey,
     };
     use num_bigint::BigUint;
     use num_traits::Num;
@@ -242,7 +242,9 @@ mod test {
     }
 
     #[test]
-    fn test_auth_response() {}
+    fn test_auth_response() {
+        // let response = AuthResponse { opcode: 0, u1: 0, u2: 0, B: [0x25, 0x22, 0x4E, 0xEE, 0xAC, 0x50, 0xA3, 0xA7, 0xEC, 0x37, 0xA2, 0x13, 0x6, 0x80, 0x15, 0x6A, 0x6D, 0xBE, 0xC3, 0x16, 0x18, 0xB6, 0xF2, 0xDD, 0x5C, 0xE6, 0xFB, 0x30, 0xEC, 0x96, 0xD3, 0x80], u3: 1, g: [7], u4: 20, N: [B7, 9B, 3E, 2A, 87, 82, 3C, AB, 8F, 5E, BF, BF, 8E, B1, 1, 8, 53, 50, 6, 29, 8B, 5B, AD, BD, 5B, 53, E1, 89, 5E, 64, 4B, 89], salt: [0xDB, 0x8A, 0xF4, 0x7A, 0x69, 0x43, 0x7C, 0xC0, 0x95, 0x5F, 0x14, 0xCF, 0xC9, 0x81, 0xDE, 0xB, 0x95, 0xBF, 0x7, 0xB, 0x5C, 0xAE, 0x6, 0x57, 0x51, 0x85, 0xFA, 0x7F, 0x76, 0x1B, 0x1, 0x8B], unk1: [BA, A3, 1E, 99, A0, B, 21, 57, FC, 37, 3F, B3, 69, CD, D2, F1], securityFlags: 0 };
+    }
 
     #[test]
     fn test_verifier() {
@@ -258,8 +260,66 @@ mod test {
         assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
         let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
         assert_eq!(
-            &ah_le(&v),
+            &ah_be(&v),
             "5cddbd8db378422a2cf948638a8f38616f102911f14ebdaad634fd4bacf4bc18"
+        );
+    }
+
+    #[test]
+    fn test_verifier2() {
+        let salt: Salt = [
+            0xDB, 0x8A, 0xF4, 0x7A, 0x69, 0x43, 0x7C, 0xC0, 0x95, 0x5F, 0x14, 0xCF, 0xC9, 0x81,
+            0xDE, 0xB, 0x95, 0xBF, 0x7, 0xB, 0x5C, 0xAE, 0x6, 0x57, 0x51, 0x85, 0xFA, 0x7F, 0x76,
+            0x1B, 0x1, 0x8B,
+        ];
+
+        dbg!(ah_le(&salt));
+        let salt = BigUint::from_bytes_le(&salt);
+
+        let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
+
+        let _I = sha1_hash("TLIPP".as_bytes());
+        assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
+        let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
+        assert_eq!(
+            &ah_be(&v),
+            "45d9d906286c34051b6d5240383c9a02b00a1a58ff75385f4911f5300f482c04"
+        );
+    }
+
+    #[test]
+    fn test_palli() {
+        let _b = BigUint::from_str_radix(
+            "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+            16,
+        )
+        .unwrap();
+
+        let salt: Salt = [
+            0xDB, 0x8A, 0xF4, 0x7A, 0x69, 0x43, 0x7C, 0xC0, 0x95, 0x5F, 0x14, 0xCF, 0xC9, 0x81,
+            0xDE, 0xB, 0x95, 0xBF, 0x7, 0xB, 0x5C, 0xAE, 0x6, 0x57, 0x51, 0x85, 0xFA, 0x7F, 0x76,
+            0x1B, 0x1, 0x8B,
+        ];
+
+        dbg!(ah_le(&salt));
+        let salt = BigUint::from_bytes_le(&salt);
+
+        let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
+
+        let _I = sha1_hash("TLIPP".as_bytes());
+        assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
+        let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
+
+        assert_eq!(
+            &ah_be(&v),
+            "45d9d906286c34051b6d5240383c9a02b00a1a58ff75385f4911f5300f482c04"
+        );
+
+        let B = AuthResponse::calculate_B(_b, BigUint::from_bytes_be(&v));
+
+        assert_eq!(
+            &ah_be(&B.to_bytes_be()),
+            "716b0decd9bf504d43e98720c9251196c990cd67005d9a8d364aafddaf7b206b"
         );
     }
 }

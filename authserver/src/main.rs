@@ -59,7 +59,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
 
     loop {
-        // Asynchronously wait for an inbound socket.
         let (mut socket, _) = listener.accept().await?;
         let pool_clone = pool.clone();
 

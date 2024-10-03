@@ -66,7 +66,12 @@ async fn main() -> Result<(), Error> {
         let id: i32 = account.get(0);
         return Err(Error::AccountAlreadyExists(id));
     } else {
-        let salt: Salt = generate_random_bytes();
+        // let salt: Salt = generate_random_bytes();
+        let salt: Salt = [
+            0xDB, 0x8A, 0xF4, 0x7A, 0x69, 0x43, 0x7C, 0xC0, 0x95, 0x5F, 0x14, 0xCF, 0xC9, 0x81,
+            0xDE, 0xB, 0x95, 0xBF, 0x7, 0xB, 0x5C, 0xAE, 0x6, 0x57, 0x51, 0x85, 0xFA, 0x7F, 0x76,
+            0x1B, 0x1, 0x8B,
+        ];
         let verifier = calculate_verifier(&username_upper, &args.password, &salt);
         let new_row = client
             .query_one(

@@ -286,6 +286,14 @@ pub struct AuthResponse {
 impl ZerocopyTraits for AuthResponse {}
 impl WowRawPacket for AuthResponse {}
 
+impl AuthResponse {
+    pub fn calculate_B(_b: BigUint, verifier: BigUint) -> BigUint {
+        use srp6::{g, N};
+        let three = BigUint::from(3u32);
+        (g.modpow(&_b, &N) + (verifier * three)) % &*N
+    }
+}
+
 pub fn generate_random_bytes<const N: usize>() -> [u8; N] {
     let mut rng = rand::thread_rng();
     let mut bytes = [0u8; N];
@@ -365,6 +373,23 @@ pub mod srp6 {
         LazyLock::new(|| N.to_bytes_le().try_into().unwrap());
 }
 
+pub struct Ah<'a>(&'a BigUint);
+
+impl std::fmt::Display for Ah<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.to_str_radix(16).to_lowercase())
+    }
+}
+
+pub struct Aha<'a, const N: usize>(&'a [u8; N]);
+
+impl<'a, const N: usize> std::fmt::Display for Aha<'a, N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let b = BigUint::from_bytes_le(self.0);
+        write!(f, "{}", b.to_str_radix(16))
+    }
+}
+
 impl AuthClientProof {
     // static Verifier CalculateVerifier(std::string const& username, std::string const& password, Salt const& salt);
     // static EphemeralKey _B(BigNumber const& b, BigNumber const& v) { return ((_g.ModExp(b, _N) + (v * 3)) % N).ToByteArray<EPHEMERAL_KEY_LENGTH>(); }
@@ -378,15 +403,18 @@ impl AuthClientProof {
     ) -> Result<SessionKey, ProtocolError> {
         use srp6::{g, N};
 
-        let _b_bytes = generate_random_bytes::<32>();
-        let _b = BigUint::from_bytes_le(&_b_bytes);
+        // let _b_bytes = generate_random_bytes::<32>();
+        // let _b = BigUint::from_bytes_le(&_b_bytes);
+        let _b = BigUint::from_str_radix(
+            "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+            16,
+        )
+        .unwrap();
 
-        let A = BigUint::from_bytes_be(&self.A);
+        let A = BigUint::from_bytes_le(&self.A);
 
-        let s = BigUint::from_bytes_be(salt);
+        let s = BigUint::from_bytes_le(salt);
         let v = BigUint::from_bytes_be(verifier);
-
-        println!("{s:X?} {v:X?}");
 
         assert_ne!(&A % &*N, BigUint::ZERO);
         if &A % &*N == BigUint::ZERO {
@@ -424,6 +452,14 @@ impl AuthClientProof {
 
         let _I = sha1_hash(username_upper.as_bytes());
         let salt_bytes = s.to_bytes_le();
+
+        eprintln!("A: {}", Ah(&A));
+        eprintln!("B: {}", Ah(&B));
+        eprintln!("_b: {}", Ah(&_b));
+        eprintln!("v: {}", Ah(&v));
+        eprintln!("u: {}", Ah(&u));
+        eprintln!("S: {}", Ah(&S));
+        eprintln!("K: {}", Aha(&session_key));
 
         let our_M = sha1_hash_iter(
             (NgHash

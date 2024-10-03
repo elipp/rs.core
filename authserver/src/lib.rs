@@ -3,6 +3,7 @@ use client::{
     ProtocolError, Salt, Verifier,
 };
 use num_bigint::BigUint;
+use num_traits::Num;
 
 pub mod auth;
 
@@ -39,12 +40,17 @@ impl TryFrom<tokio_postgres::Row> for Account {
 
 pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> AuthResponse {
     use srp6::{g, N};
-    let _b = generate_random_bytes::<32>();
-    let b = BigUint::from_bytes_le(&_b);
-    let v = BigUint::from_bytes_le(verifier);
-    let three = BigUint::from(3u32);
+    // let _b = generate_random_bytes::<32>();
 
-    let B = (g.modpow(&b, &N) + (v * three)) % &*N;
+    // let b = BigUint::from_bytes_le(&_b);
+    let b = BigUint::from_str_radix(
+        "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+        16,
+    )
+    .unwrap();
+    let v = BigUint::from_bytes_be(verifier);
+
+    let B = AuthResponse::calculate_B(b, v);
     let B_bytes = to_zero_padded_array_le::<32>(&B.to_bytes_le());
 
     AuthResponse {

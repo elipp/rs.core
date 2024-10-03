@@ -118,13 +118,23 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     let mut A;
 
     loop {
-        let random_bytes = rand::thread_rng().gen::<[u8; 19]>();
+        // let random_bytes = rand::thread_rng().gen::<[u8; 19]>();
+
+        let random_bytes = [
+            0x4F, 0xBA, 0x40, 0x65, 0x3D, 0x98, 0xC9, 0xC3, 0x11, 0xF6, 0xC2, 0xD5, 0x5, 0xFA,
+            0x4A, 0xD4, 0x27, 0x16, 0x96, 0xFE, 0xDC, 0xE3, 0xD2, 0xA0, 0x25, 0x99, 0xCA, 0xD,
+            0xFA, 0xED, 0xF3, 0xF6,
+        ];
+
         a = BigUint::from_bytes_le(&random_bytes);
         A = g.modpow(&a, &N);
         if !A.modpow(&one, &N).is_zero() {
             break;
         }
     }
+
+    println!("{:X?}", A.to_bytes_be());
+
     let A_bytes = to_zero_padded_array_le::<32>(&A.to_bytes_le());
     let B_bytes = to_zero_padded_array_le::<32>(&B.to_bytes_le());
 
