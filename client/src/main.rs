@@ -11,7 +11,7 @@ use rand::Rng;
 use std::io::prelude::*;
 use std::mem::{size_of, MaybeUninit};
 use std::sync::LazyLock;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use zerocopy::{FromBytes, IntoBytes};
 
 use rc4::{Key, Rc4, StreamCipher};
@@ -67,12 +67,12 @@ type WowCliResult<T> = Result<T, WowCliError>;
 
 fn new_auth_challenge(username: &str) -> Box<[u8]> {
     let mut buf = Vec::new();
+    let header = PktHeader::new_from_body_length(
+        opcodes::AuthOpcode::AUTH_LOGON_CHALLENGE as u16,
+        size_of::<AuthChallengeWithoutUsername>() + username.as_bytes().len(),
+    );
     let challenge = AuthChallengeWithoutUsername {
-        header: PktHeader::new(
-            opcodes::AuthOpcode::AUTH_LOGON_CHALLENGE as u16,
-            size_of::<AuthChallengeWithoutUsername>() + username.as_bytes().len()
-                - size_of::<PktHeader>(),
-        ),
+        header,
         magic: WOW_MAGIC.to_owned(),
         version: WOTLK_VERSION.to_owned(),
         build: WOTLK_BUILD.to_owned(),
@@ -89,22 +89,6 @@ fn new_auth_challenge(username: &str) -> Box<[u8]> {
     buf.into_boxed_slice()
 }
 
-// fn get_auth_challenge(username: &str) -> WowCliResult<Vec<u8>> {
-//     let mut buf = Vec::<u8>::new();
-//     buf.push(0x00);
-//     buf.push(0x06);
-//     buf.extend(((username.len() + 30) as u16).to_le_bytes());
-//     buf.extend(b"WoW\0".as_slice());
-//     buf.extend(VERSION);
-//     buf.extend(BUILD.to_le_bytes());
-//     buf.extend(reversed(CLIENTINFO));
-//     buf.extend((0x78 as u32).to_le_bytes()); // timezone bias
-//     buf.extend((0x6401A8C0 as u32).to_le_bytes()); // ip, 192.168.1.100
-//     buf.push(username.len() as u8);
-//     buf.extend(username.to_uppercase().into_bytes());
-//     Ok(buf)
-// }
-
 impl From<std::io::Error> for WowCliError {
     fn from(err: std::io::Error) -> Self {
         Self::IoError(err)
@@ -116,7 +100,6 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     let B = BigUint::from_bytes_le(&auth.B);
     let g = BigUint::from_bytes_le(&auth.g);
     let N = BigUint::from_bytes_le(&auth.N);
-    // let s = BigUint::from_bytes_le(&auth.salt);
 
     let k = BigUint::from(3u32);
 
@@ -131,13 +114,13 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     let mut A;
 
     loop {
-        // let random_bytes = rand::thread_rng().gen::<[u8; 19]>();
+        let random_bytes = rand::thread_rng().gen::<[u8; 19]>();
 
-        let random_bytes = [
-            0x4F, 0xBA, 0x40, 0x65, 0x3D, 0x98, 0xC9, 0xC3, 0x11, 0xF6, 0xC2, 0xD5, 0x5, 0xFA,
-            0x4A, 0xD4, 0x27, 0x16, 0x96, 0xFE, 0xDC, 0xE3, 0xD2, 0xA0, 0x21, 0x99, 0xCA, 0xD,
-            0xFA, 0xED, 0xF3, 0xF6,
-        ];
+        // let random_bytes = [
+        //     0x4F, 0xBA, 0x40, 0x65, 0x3D, 0x98, 0xC9, 0xC3, 0x11, 0xF6, 0xC2, 0xD5, 0x5, 0xFA,
+        //     0x4A, 0xD4, 0x27, 0x16, 0x96, 0xFE, 0xDC, 0xE3, 0xD2, 0xA0, 0x21, 0x99, 0xCA, 0xD,
+        //     0xFA, 0xED, 0xF3, 0xF6,
+        // ];
 
         a = BigUint::from_bytes_le(&random_bytes);
         A = g.modpow(&a, &N);

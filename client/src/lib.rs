@@ -113,10 +113,10 @@ pub struct PktHeader {
 }
 
 impl PktHeader {
-    pub fn new(opcode: u16, length: usize) -> Self {
+    pub fn new_from_body_length(opcode: u16, length: usize) -> Self {
         Self {
             opcode: (opcode as u16).into(),
-            length: length as u16,
+            length: (length - size_of::<Self>()) as u16,
         }
     }
 }
