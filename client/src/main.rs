@@ -1,18 +1,19 @@
 use client::{
-    commands, interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le,
+    commands::{self, CMD_REALM_LIST},
+    interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le,
     AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof, AuthResponse, AuthServerProof,
-    PktHeader, ProtocolError, RealmAuthChallenge, SessionKey, WowProtoPacket, WowRawPacket, WowRc4,
-    WritePacket, WOTLK_BUILD, WOTLK_VERSION, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
+    PktHeader, ProtoPacket, ProtocolError, RealmAuthChallenge, RealmListResult, RecvPacket,
+    SendPacket, SessionKey, WowProtoPacket, WowRawPacket, WowRc4, WOTLK_BUILD, WOTLK_VERSION,
+    WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
 };
 use num_bigint::BigUint;
 use num_traits::Zero;
 use opcodes::Opcode;
 use rand::Rng;
-use std::io::prelude::*;
-use std::mem::{size_of, MaybeUninit};
+use std::mem::size_of;
 use std::sync::LazyLock;
-use tokio::io::AsyncWriteExt;
-use zerocopy::{FromBytes, IntoBytes};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use rc4::{Key, Rc4, StreamCipher};
 
@@ -27,7 +28,7 @@ static REALMSERVER: LazyLock<String> = LazyLock::new(|| {
 });
 
 // const REALMSERVER: &str = "logon.stormforge.gg:3724";
-const USERNAME: &str = "elipp";
+const USERNAME: &str = "tlipp";
 const PASSWORD: &str = "kuusysi69"; // lol these are case-insensitive apparently
 
 const CLIENTINFO: [u8; 12] = *b"enUS\0Win\0x86";
@@ -65,28 +66,34 @@ fn reversed<T: Clone>(arg: &[T]) -> Vec<T> {
 
 type WowCliResult<T> = Result<T, WowCliError>;
 
-fn new_auth_challenge(username: &str) -> Box<[u8]> {
+fn new_auth_challenge(username: &str) -> Vec<u8> {
     let mut buf = Vec::new();
-    let header = PktHeader::new_from_body_length(
+
+    let header = PktHeader::new(
         opcodes::AuthOpcode::AUTH_LOGON_CHALLENGE as u16,
         size_of::<AuthChallengeWithoutUsername>() + username.as_bytes().len(),
     );
-    let challenge = AuthChallengeWithoutUsername {
+
+    dbg!(header);
+
+    let challenge: ProtoPacket<AuthChallengeWithoutUsername> = ProtoPacket {
         header,
-        magic: WOW_MAGIC.to_owned(),
-        version: WOTLK_VERSION.to_owned(),
-        build: WOTLK_BUILD.to_owned(),
-        client_info_reversed: CLIENTINFO_REVERSED.to_owned(),
-        timezone: 0x78,
-        ip: 0x6401A8C0,
-        username_len: username
-            .len()
-            .try_into()
-            .expect("username length to fit u16"),
+        body: AuthChallengeWithoutUsername {
+            magic: WOW_MAGIC.to_owned(),
+            version: WOTLK_VERSION.to_owned(),
+            build: WOTLK_BUILD.to_owned(),
+            client_info_reversed: CLIENTINFO_REVERSED.to_owned(),
+            timezone: 0x78,
+            ip: 0x6401A8C0,
+            username_len: username
+                .len()
+                .try_into()
+                .expect("username length to fit u16"),
+        },
     };
     buf.extend_from_slice(challenge.as_bytes());
     buf.extend_from_slice(username.to_uppercase().as_bytes());
-    buf.into_boxed_slice()
+    buf
 }
 
 impl From<std::io::Error> for WowCliError {
@@ -115,13 +122,6 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
 
     loop {
         let random_bytes = rand::thread_rng().gen::<[u8; 19]>();
-
-        // let random_bytes = [
-        //     0x4F, 0xBA, 0x40, 0x65, 0x3D, 0x98, 0xC9, 0xC3, 0x11, 0xF6, 0xC2, 0xD5, 0x5, 0xFA,
-        //     0x4A, 0xD4, 0x27, 0x16, 0x96, 0xFE, 0xDC, 0xE3, 0xD2, 0xA0, 0x21, 0x99, 0xCA, 0xD,
-        //     0xFA, 0xED, 0xF3, 0xF6,
-        // ];
-
         a = BigUint::from_bytes_le(&random_bytes);
         A = g.modpow(&a, &N);
         if !A.modpow(&one, &N).is_zero() {
@@ -170,24 +170,6 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     ))
 }
 
-unsafe fn read_as<R: std::io::Read, T: Sized>(stream: &mut R) -> WowCliResult<T> {
-    let mut read_buf = vec![0; size_of::<T>()];
-    stream.read_exact(&mut read_buf)?;
-    let mut res = MaybeUninit::<T>::uninit();
-    std::ptr::copy_nonoverlapping(
-        read_buf.as_ptr(),
-        res.as_mut_ptr() as *mut u8,
-        size_of::<T>(),
-    );
-    Ok(res.assume_init())
-}
-
-fn read_byte<R: std::io::Read>(stream: &mut R) -> WowCliResult<u8> {
-    let mut res = [0u8; 1];
-    stream.read_exact(&mut res)?;
-    Ok(res[0])
-}
-
 #[derive(Debug)]
 struct Realm {
     r#type: u8,
@@ -207,70 +189,84 @@ impl Realm {
     }
 }
 
-fn read_chunk<S: std::io::Read, const N: usize>(stream: &mut S) -> WowCliResult<Vec<u8>> {
-    let mut res = [0u8; N];
-    let bytes = stream.read(&mut res)?;
-    if bytes >= N {
-        // bug: could be exactly `bytes`...
-        return Err(WowCliError::BufferTooSmall);
-    }
-
-    Ok(res[..bytes].to_vec())
-}
-
-fn read_until_null<R: Read>(reader: &mut R) -> WowCliResult<Vec<u8>> {
-    let mut data = Vec::new();
-    let mut buf = [0; 1]; // Read one byte at a time
-
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => break, // End of input stream
-            Ok(_) => {
-                if buf[0] == 0 {
-                    break; // Null byte found, stop reading
-                }
-                data.push(buf[0]);
-            }
-            Err(e) => return Err(WowCliError::IoError(e)),
-        }
-    }
-
-    Ok(data)
-}
-
+#[derive(IntoBytes, Immutable)]
+#[repr(C, packed)]
 struct RequestRealmlist {
     cmd: u8,
+    unknown: [u8; 4],
 }
 
-// async fn request_realmlist<S: AsyncReadExt + AsyncWriteExt + Unpin>(
-//     stream: &mut S,
-// ) -> WowCliResult<Vec<Realm>> {
-//     let mut buf = vec![0u8; 1024];
-//     stream
-//         .write_all(&[commands::CMD_REALM_LIST, 0x0, 0x0, 0x0, 0x0])
-//         .await
-//         .map_err(|e| WowCliError::NetworkError)?;
-//     let realmlist = RealmListResult::read_as_wowprotopacket(&mut stream, &mut buf);
-//     let rest_of_bytes = read_chunk::<_, 4096>(stream)?;
-//     let mut cursor = std::io::Cursor::new(rest_of_bytes);
-//     let mut realms = Vec::new();
-//     for _ in 0..realmlist.num_realms {
-//         unsafe {
-//             realms.push(Realm {
-//                 r#type: read_as(&mut cursor)?,
-//                 lock: read_as(&mut cursor)?,
-//                 flags: read_as(&mut cursor)?,
-//                 name: String::from_utf8_lossy(&read_until_null(&mut cursor)?).to_string(),
-//                 address: String::from_utf8_lossy(&read_until_null(&mut cursor)?).to_string(),
-//                 poplevel: read_as(&mut cursor)?,
-//                 num_chars: read_as(&mut cursor)?,
-//                 timezone: read_as(&mut cursor)?,
-//                 _unk1: read_as(&mut cursor)?,
-//             });
-//         }
-//     }
-//     Ok(realms)
-// }
+impl Default for RequestRealmlist {
+    fn default() -> Self {
+        Self {
+            cmd: CMD_REALM_LIST,
+            unknown: [0; 4],
+        }
+    }
+}
+
+fn split_on_null_byte(data: &[u8]) -> (&[u8], &[u8]) {
+    if let Some(pos) = data.iter().position(|&b| b == 0) {
+        // Split at the position of the null byte
+        let (before_null, after_null) = data.split_at(pos);
+        // `after_null` starts at the null byte, so skip it by slicing 1 byte further
+        (before_null, &after_null[1..])
+    } else {
+        // If no null byte found, return the whole slice and an empty slice
+        (data, &[])
+    }
+}
+
+async fn request_realmlist<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+    stream: &mut S,
+) -> WowCliResult<Vec<Realm>> {
+    #[derive(FromBytes, Immutable, KnownLayout, Unaligned)]
+    #[repr(C, packed)]
+    struct RealmFirstPart {
+        r#type: u8,
+        lock: u8,
+        flags: u8,
+    }
+
+    #[derive(FromBytes, Immutable, KnownLayout, Unaligned)]
+    #[repr(C, packed)]
+    struct RealmLastPart {
+        poplevel: f32,
+        num_chars: u8,
+        timezone: u8,
+        _unk1: u8,
+    }
+
+    let mut buf = vec![0u8; 1024 * 16];
+    let request = RequestRealmlist::default();
+    request.send(stream).await?;
+
+    let realmlist = ProtoPacket::<RealmListResult>::recv(stream, &mut buf)
+        .await
+        .unwrap();
+
+    let mut realms = Vec::new();
+    let mut current_body = &realmlist.body.body[..];
+    for _ in 0..realmlist.body.num_realms {
+        let (first, rest) = RealmFirstPart::ref_from_prefix(current_body).unwrap();
+        let (name, rest) = split_on_null_byte(rest);
+        let (address, rest) = split_on_null_byte(rest);
+        let (last, rest) = RealmLastPart::ref_from_prefix(rest).unwrap();
+        realms.push(Realm {
+            name: String::from_utf8_lossy(name).to_string(),
+            address: String::from_utf8_lossy(address).to_string(),
+            r#type: first.r#type,
+            lock: first.lock,
+            flags: first.flags,
+            poplevel: last.poplevel,
+            num_chars: last.num_chars,
+            timezone: last.timezone,
+            _unk1: last._unk1,
+        });
+        current_body = rest;
+    }
+    Ok(realms)
+}
 
 #[derive(Debug)]
 struct ClientPacketHeader {
@@ -411,12 +407,8 @@ async fn main() -> WowCliResult<()> {
     let (realms, session_key): (Vec<Realm>, _) = {
         let mut stream = tokio::net::TcpStream::connect(&*REALMSERVER).await?;
         let challenge = new_auth_challenge(USERNAME);
-        let packet = match AuthChallenge::ref_from_bytes(&challenge) {
-            Ok(p) => p,
-            Err(e) => {
-                panic!("{e}")
-            }
-        };
+
+        let packet = ProtoPacket::<AuthChallenge>::ref_from_bytes(&challenge).unwrap();
         packet.send(&mut stream).await?;
 
         let (auth_response, _) = AuthResponse::read_as_rawpacket(&mut stream, &mut buf)
@@ -439,7 +431,7 @@ async fn main() -> WowCliResult<()> {
         println!("got server proof {server_proof:?}");
         if server_proof.cmd == commands::AUTH_LOGON_PROOF && server_proof.error == 0x0 {
             println!("login at {} as {} successful!", &*REALMSERVER, USERNAME);
-            (vec![], session_key)
+            (request_realmlist(&mut stream).await?, session_key)
         } else {
             return Err(WowCliError::LoginFailed);
         }

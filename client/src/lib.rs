@@ -5,8 +5,6 @@ mod opcodes;
 use crypto::common::typenum::{UInt, UTerm};
 use hmac::{Hmac, Mac};
 use num_bigint::BigUint;
-use num_traits::Num;
-use opcodes::{AuthOpcode, Opcode};
 use rc4::{
     cipher::InvalidLength,
     consts::{B0, B1},
@@ -105,18 +103,18 @@ const _TBC_KEY_SEED: &[u8] = &[
     0x38, 0xA7, 0x83, 0x15, 0xF8, 0x92, 0x25, 0x30, 0x71, 0x98, 0x67, 0xB1, 0x8C, 0x4, 0xE2, 0xAA,
 ];
 
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
-#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
 pub struct PktHeader {
     opcode: network_endian::U16,
     length: u16,
 }
 
 impl PktHeader {
-    pub fn new_from_body_length(opcode: u16, length: usize) -> Self {
+    pub fn new(opcode: u16, length: usize) -> Self {
         Self {
             opcode: (opcode as u16).into(),
-            length: (length - size_of::<Self>()) as u16,
+            length: length as u16,
         }
     }
 }
@@ -216,38 +214,16 @@ pub trait WowProtoPacket: ZerocopyTraits {
     }
 }
 
-#[derive(FromBytes, KnownLayout, Immutable)]
+#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-pub struct ProtoPacket {
+pub struct ProtoPacket<T: FromBytes + KnownLayout + Immutable + Unaligned + ?Sized> {
     pub header: PktHeader,
-    pub body: [u8],
-}
-
-impl ProtoPacket {
-    pub fn body_len(&self) -> usize {
-        (&self.body[..]).len()
-    }
-}
-
-impl WritePacket for ProtoPacket {
-    async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError> {
-        write
-            .write_all(self.header.as_bytes())
-            .await
-            .map_err(|e| ProtocolError::Error(format!("header write failed")))?;
-
-        write
-            .write_all(&self.body)
-            .await
-            .map_err(|e| ProtocolError::Error(format!("body write failed")))?;
-        Ok(())
-    }
+    pub body: T,
 }
 
 #[repr(C, packed)]
 #[derive(Debug, IntoBytes, FromBytes, KnownLayout, Unaligned, Immutable)]
 pub struct AuthChallengeWithoutUsername {
-    pub header: PktHeader,
     pub magic: [u8; 4],
     pub version: [u8; 3],
     pub build: u16,
@@ -257,19 +233,53 @@ pub struct AuthChallengeWithoutUsername {
     pub username_len: u8,
 }
 
-pub trait WritePacket {
+pub trait SendPacket {
     async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError>;
 }
 
-impl<T> WritePacket for T
+pub trait RecvPacket: 'static {
+    async fn recv<'b, R: AsyncReadExt + Unpin>(
+        write: &mut R,
+        buf: &'b mut [u8],
+    ) -> Result<&'b Self, ProtocolError>;
+}
+
+impl<T> SendPacket for T
 where
     T: IntoBytes + Immutable + ?Sized,
 {
     async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError> {
+        println!(
+            "sending packet of {} bytes: {:?}",
+            self.as_bytes().len(),
+            self.as_bytes()
+        );
         write
             .write_all(self.as_bytes())
             .await
             .map_err(|e| ProtocolError::Error(String::from("prkl")))
+    }
+}
+
+impl<T> RecvPacket for ProtoPacket<T>
+where
+    T: FromBytes + KnownLayout + Immutable + Unaligned + ?Sized + 'static,
+{
+    async fn recv<'b, R: AsyncReadExt + Unpin>(
+        read: &mut R,
+        buf: &'b mut [u8],
+    ) -> Result<&'b Self, ProtocolError> {
+        read.read_exact(&mut buf[..H])
+            .await
+            .map_err(|e| ProtocolError::Error(String::from("read()")))?;
+
+        let body_length = PktHeader::ref_from_bytes(&buf[..H]).unwrap().length;
+
+        read.read_exact(&mut buf[H..H + body_length as usize])
+            .await
+            .map_err(|e| ProtocolError::Error(String::from("read() 2")))?;
+
+        Ok(Self::ref_from_bytes(&buf[..H + body_length as usize]).unwrap())
     }
 }
 
@@ -288,32 +298,6 @@ impl std::fmt::Display for AuthChallenge {
             self.header,
             &self.username[..]
         )
-    }
-}
-
-impl AuthChallenge {
-    pub async fn read_from_socket<'b, R: AsyncReadExt + Unpin>(
-        read: &mut R,
-        buf: &'b mut [u8],
-    ) -> Result<&'b Self, ProtocolError> {
-        const H: usize = size_of::<AuthChallengeWithoutUsername>();
-        read.read_exact(&mut buf[..H])
-            .await
-            .map_err(|e| ProtocolError::Error(format!("{e:?}")))?;
-
-        let username_len = {
-            AuthChallengeWithoutUsername::ref_from_bytes(&buf[..H])
-                .unwrap()
-                .username_len as usize
-        };
-        // TODO validate username_len
-
-        read.read_exact(&mut buf[H..H + username_len])
-            .await
-            .map_err(|e| ProtocolError::Error(format!("{e:?}")))?;
-
-        Ok(Self::ref_from_bytes(&buf[..H + username_len])
-            .map_err(|e| ProtocolError::Error(format!("{e:?}")))?)
     }
 }
 
@@ -628,21 +612,14 @@ impl WowProtoPacket for RealmAuthChallenge {
     }
 }
 
-#[derive(Debug, Clone, Copy, IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
 pub struct RealmListResult {
-    pub header: PktHeader,
     pub cmd: u8,
     pub packet_size: u16,
     pub _unused: u32,
     pub num_realms: u16,
+    pub body: [u8],
 }
 
-impl ZerocopyTraits for RealmListResult {}
-impl WowProtoPacket for RealmListResult {
-    const OPCODE: Option<u16> = Some(opcodes::Opcode::MSG_NULL_ACTION as u16);
-
-    fn get_header(&self) -> PktHeader {
-        self.header
-    }
-}
+// impl ZerocopyTraits for RealmListResult {}

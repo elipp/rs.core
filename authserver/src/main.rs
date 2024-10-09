@@ -8,8 +8,8 @@ use tokio_postgres::NoTls;
 use deadpool_postgres::{GenericClient, ManagerConfig, RecyclingMethod, Runtime};
 
 use client::{
-    commands, generate_random_bytes, AuthChallenge, AuthClientProof, AuthServerProof,
-    ProtocolError, WowRawPacket,
+    commands, generate_random_bytes, AuthChallenge, AuthClientProof, AuthServerProof, ProtoPacket,
+    ProtocolError, RecvPacket, WowRawPacket,
 };
 use core::str;
 use std::env;
@@ -70,15 +70,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .peer_addr()
                     .map_err(|e| AuthError::Error(format!("couldn't get peer addr: {e:?}")))?;
 
-                let challenge = AuthChallenge::read_from_socket(&mut socket, &mut buf).await?;
-                let username = match str::from_utf8(&challenge.username) {
+                let challenge = ProtoPacket::<AuthChallenge>::recv(&mut socket, &mut buf).await?;
+                eprintln!(
+                    "{:?}, {:?}",
+                    challenge.body.header,
+                    &challenge.body.username[..]
+                );
+
+                let username = match str::from_utf8(&challenge.body.username) {
                     Ok(username) => username.to_owned(),
                     Err(_) => {
                         return Err(ProtocolError::Error(format!("bad username")));
                     }
                 };
 
-                challenge.validate()?;
+                challenge.body.validate()?;
 
                 let connection = pool_clone
                     .get()
@@ -94,8 +100,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                     println!(
                         "username {username} logging in from {ip:?} {} {:?}",
-                        challenge.get_client_language()?,
-                        challenge.get_client_os_platform()?
+                        challenge.body.get_client_language()?,
+                        challenge.body.get_client_os_platform()?
                     );
 
                     let (response, _b) = new_auth_response(&account.salt, &account.verifier);
