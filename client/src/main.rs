@@ -27,7 +27,7 @@ static REALMSERVER: LazyLock<String> = LazyLock::new(|| {
 });
 
 // const REALMSERVER: &str = "logon.stormforge.gg:3724";
-const USERNAME: &str = "tlipp";
+const USERNAME: &str = "elipp";
 const PASSWORD: &str = "kuusysi69"; // lol these are case-insensitive apparently
 
 const CLIENTINFO: [u8; 12] = *b"enUS\0Win\0x86";
