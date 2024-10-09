@@ -250,10 +250,11 @@ where
     T: IntoBytes + Immutable + ?Sized,
 {
     async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError> {
+        eprintln!("sending {} bytes", self.as_bytes().len());
         write
             .write_all(self.as_bytes())
             .await
-            .map_err(|e| ProtocolError::Error(String::from("joo vittu")))
+            .map_err(|e| ProtocolError::Error(String::from("prkl")))
     }
 }
 

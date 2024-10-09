@@ -1,9 +1,8 @@
 use client::{
     commands, interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le,
     AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof, AuthResponse, AuthServerProof,
-    GenericProtoPacket, ProtocolError, RealmAuthChallenge, RealmListResult, SessionKey,
-    WowProtoPacket, WowRawPacket, WowRc4, WritePacket, WOTLK_BUILD, WOTLK_VERSION,
-    WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
+    ProtocolError, RealmAuthChallenge, SessionKey, WowProtoPacket, WowRawPacket, WowRc4,
+    WritePacket, WOTLK_BUILD, WOTLK_VERSION, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
 };
 use num_bigint::BigUint;
 use num_traits::Zero;
