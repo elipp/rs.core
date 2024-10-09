@@ -8,12 +8,12 @@ default-run = "authserver"
 tokio = { version="1", features=["full"] }
 client = { path="../client" }
 rand = { version = "0.8.5", features = ["min_const_gen"] }
-zerocopy = { version = "0", features = ["byteorder", "derive"] }
+zerocopy = { version = "0.8", features = ["derive"] }
 tokio-postgres = "0"
 deadpool-postgres = "0"
 num-bigint = "0"
 clap = { version = "4", features = ["derive"] }
-num-traits = "0.2.19"
+num-traits = "0"
 
 [[bin]]
 path = "src/utils/add_account.rs"

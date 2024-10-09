@@ -38,16 +38,15 @@ impl TryFrom<tokio_postgres::Row> for Account {
     }
 }
 
+#[allow(non_snake_case)]
 pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> AuthResponse {
-    use srp6::{g, N};
-    // let _b = generate_random_bytes::<32>();
-
-    // let b = BigUint::from_bytes_le(&_b);
-    let b = BigUint::from_str_radix(
-        "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
-        16,
-    )
-    .unwrap();
+    let _b = generate_random_bytes::<32>();
+    let b = BigUint::from_bytes_le(&_b);
+    // let b = BigUint::from_str_radix(
+    //     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    //     16,
+    // )
+    // .unwrap();
     let v = BigUint::from_bytes_be(verifier);
 
     let B = AuthResponse::calculate_B(b, v);

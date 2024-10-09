@@ -8,13 +8,13 @@ use tokio_postgres::NoTls;
 use deadpool_postgres::{GenericClient, ManagerConfig, RecyclingMethod, Runtime};
 
 use client::{
-    commands, generate_random_bytes, AuthChallenge, AuthClientProof, AuthResponse, AuthServerProof,
-    ProtocolError, WowProtoPacket, WowRawPacket,
+    commands, generate_random_bytes, AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof,
+    AuthResponse, AuthServerProof, ProtocolError, WowProtoPacket, WowRawPacket,
 };
 use core::str;
 use std::env;
 use std::error::Error;
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 pub mod auth;
 
@@ -70,71 +70,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .peer_addr()
                     .map_err(|e| AuthError::Error(format!("couldn't get peer addr: {e:?}")))?;
 
-                if let (Some(challenge), after) =
-                    AuthChallenge::read_as_wowprotopacket(&mut socket, &mut buf).await?
-                {
-                    let username = match str::from_utf8(&after[..challenge.username_len as usize]) {
-                        Ok(username) => username.to_owned(),
-                        Err(_) => {
-                            return Err(ProtocolError::Error(format!("bad username")));
-                        }
-                    };
-
-                    challenge.validate()?;
-
-                    let connection = pool_clone
-                        .get()
-                        .await
-                        .map_err(|e| ProtocolError::DbError(format!("Pool error: {e:?}")))?;
-
-                    if let Some(account) = connection
-                        .query_opt("SELECT * FROM account WHERE username=$1", &[&username])
-                        .await
-                        .map_err(|e| AuthError::DbError(e))?
-                    {
-                        let account: Account = account.try_into()?;
-
-                        println!(
-                            "username {username} logging in from {ip:?} {} {:?}",
-                            challenge.get_client_language()?,
-                            challenge.get_client_os_platform()?
-                        );
-
-                        let response = new_auth_response(&account.salt, &account.verifier);
-                        socket
-                            .write_all(response.as_bytes())
-                            .await
-                            .expect("write authresponse failed");
-
-                        if let (Some(proof), _) =
-                            AuthClientProof::read_as_rawpacket(&mut socket, &mut buf).await?
-                        {
-                            eprintln!("got client proof {proof:?}");
-                            proof.verify(&account.salt, &account.verifier, &username)?;
-
-                            let server_proof = AuthServerProof {
-                                cmd: commands::AUTH_LOGON_PROOF,
-                                error: AuthResult::Success as u8,
-                                M2: generate_random_bytes(),
-                                accountFlags: 0x0,
-                                surveyId: 0x0,
-                                unkFlags: 0x0,
-                            };
-                            socket
-                                .write_all(server_proof.as_bytes())
-                                .await
-                                .map_err(|e| {
-                                    ProtocolError::Error(format!(
-                                        "writing AuthServerProof failed: {e:?}"
-                                    ))
-                                })?;
-                        } else {
-                            eprintln!("couldn't find user {username} from db");
-                            todo!("write unknown account packet to socket and exit")
-                        }
+                let challenge = AuthChallenge::read_from_socket(&mut socket, &mut buf).await?;
+                let username = match str::from_utf8(&challenge.username) {
+                    Ok(username) => username.to_owned(),
+                    Err(_) => {
+                        return Err(ProtocolError::Error(format!("bad username")));
                     }
-                }
+                };
 
+                challenge.validate()?;
+
+                let connection = pool_clone
+                    .get()
+                    .await
+                    .map_err(|e| ProtocolError::DbError(format!("Pool error: {e:?}")))?;
+
+                if let Some(account) = connection
+                    .query_opt("SELECT * FROM account WHERE username=$1", &[&username])
+                    .await
+                    .map_err(|e| AuthError::DbError(e))?
+                {
+                    let account: Account = account.try_into()?;
+
+                    println!(
+                        "username {username} logging in from {ip:?} {} {:?}",
+                        challenge.get_client_language()?,
+                        challenge.get_client_os_platform()?
+                    );
+
+                    let response = new_auth_response(&account.salt, &account.verifier);
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write authresponse failed");
+
+                    let (proof, _) =
+                        AuthClientProof::read_as_rawpacket(&mut socket, &mut buf).await?;
+                    eprintln!("got client proof {proof:?}");
+                    proof.verify(&account.salt, &account.verifier, &username)?;
+
+                    let server_proof = AuthServerProof {
+                        cmd: commands::AUTH_LOGON_PROOF,
+                        error: AuthResult::Success as u8,
+                        M2: generate_random_bytes(),
+                        accountFlags: 0x0,
+                        surveyId: 0x0,
+                        unkFlags: 0x0,
+                    };
+                    socket
+                        .write_all(server_proof.as_bytes())
+                        .await
+                        .map_err(|e| {
+                            ProtocolError::Error(format!("writing AuthServerProof failed: {e:?}"))
+                        })?;
+                } else {
+                    eprintln!("couldn't find user {username} from db");
+                    todo!("write unknown account packet to socket and exit")
+                }
                 Ok(())
             }
             .await;

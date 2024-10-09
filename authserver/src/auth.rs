@@ -73,11 +73,12 @@ pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> 
     to_zero_padded_array_le(&v.to_bytes_be()) // TODO le/be confusion
 }
 
+#[allow(unused_imports, dead_code)]
 mod test {
     use client::{
         interleave, partition, sha1_hash, sha1_hash_iter,
         srp6::{self, N_BYTES_LE},
-        to_zero_padded_array_le, AuthResponse, Salt, SessionKey,
+        to_zero_padded_array_le, Ah, AuthResponse, Salt, SessionKey,
     };
     use num_bigint::BigUint;
     use num_traits::Num;
@@ -288,9 +289,21 @@ mod test {
     }
 
     #[test]
+    fn test_verifier3() {
+        let salt = BigUint::from_str_radix(
+            "0f7a2d6aee53816e4b59b9a8d2320ce7538cfe7c85b4f96b98a6c95cca949ecc",
+            16,
+        )
+        .unwrap();
+        let salt = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
+
+        let verifier = calculate_verifier(&"tlipp".to_uppercase(), "kuusysi69", &salt);
+    }
+
+    #[test]
     fn test_palli() {
         let _b = BigUint::from_str_radix(
-            "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             16,
         )
         .unwrap();
@@ -301,7 +314,6 @@ mod test {
             0x1B, 0x1, 0x8B,
         ];
 
-        dbg!(ah_le(&salt));
         let salt = BigUint::from_bytes_le(&salt);
 
         let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
@@ -321,5 +333,36 @@ mod test {
             &ah_be(&B.to_bytes_be()),
             "716b0decd9bf504d43e98720c9251196c990cd67005d9a8d364aafddaf7b206b"
         );
+    }
+    #[test]
+    fn test_calculate_b() {
+        let salt: Salt = [
+            0xDB, 0x8A, 0xF4, 0x7A, 0x69, 0x43, 0x7C, 0xC0, 0x95, 0x5F, 0x14, 0xCF, 0xC9, 0x81,
+            0xDE, 0xB, 0x95, 0xBF, 0x7, 0xB, 0x5C, 0xAE, 0x6, 0x57, 0x51, 0x85, 0xFA, 0x7F, 0x76,
+            0x1B, 0x1, 0x8B,
+        ];
+
+        let salt = BigUint::from_bytes_le(&salt);
+
+        let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
+
+        let _I = sha1_hash("TLIPP".as_bytes());
+        assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
+        let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
+
+        let B = BigUint::from_str_radix(
+            "134C414A680FDCEB5C5B95ADC1BD94FAD72C7CCE5144BFBE30A1E7C8E57AAD9C",
+            16,
+        )
+        .unwrap();
+        let _b = BigUint::from_str_radix(
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeee", // note: intentionally "deadbeee" last
+            16,
+        )
+        .unwrap();
+
+        let calculated_B = AuthResponse::calculate_B(_b, BigUint::from_bytes_be(&v));
+        println!("{} should be {}", Ah(&B), Ah(&calculated_B));
+        assert_eq!(B, calculated_B);
     }
 }

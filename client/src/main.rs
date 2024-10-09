@@ -1,8 +1,9 @@
 use client::{
     commands, interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le,
-    AuthChallenge, AuthClientProof, AuthResponse, AuthServerProof, ProtocolError,
-    RealmAuthChallenge, RealmListResult, SessionKey, WowProtoPacket, WowRawPacket, WowRc4,
-    WOTLK_BUILD, WOTLK_VERSION, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
+    AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof, AuthResponse, AuthServerProof,
+    GenericProtoPacket, ProtocolError, RealmAuthChallenge, RealmListResult, SessionKey,
+    WowProtoPacket, WowRawPacket, WowRc4, WritePacket, WOTLK_BUILD, WOTLK_VERSION,
+    WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
 };
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -11,7 +12,7 @@ use rand::Rng;
 use std::io::prelude::*;
 use std::mem::{size_of, MaybeUninit};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use zerocopy::AsBytes;
+use zerocopy::{FromBytes, IntoBytes};
 
 use rc4::{Key, Rc4, StreamCipher};
 
@@ -61,8 +62,9 @@ fn reversed<T: Clone>(arg: &[T]) -> Vec<T> {
 
 type WowCliResult<T> = Result<T, WowCliError>;
 
-fn new_auth_challenge(username: &str) -> (AuthChallenge, Vec<u8>) {
-    let res = AuthChallenge {
+fn new_auth_challenge(username: &str) -> Box<[u8]> {
+    let mut buf = Vec::new();
+    let challenge = AuthChallengeWithoutUsername {
         magic: WOW_MAGIC.to_owned(),
         version: WOTLK_VERSION.to_owned(),
         build: WOTLK_BUILD.to_owned(),
@@ -74,7 +76,9 @@ fn new_auth_challenge(username: &str) -> (AuthChallenge, Vec<u8>) {
             .try_into()
             .expect("username length to fit u16"),
     };
-    (res, username.to_uppercase().into_bytes())
+    buf.extend_from_slice(challenge.as_bytes());
+    buf.extend_from_slice(username.to_uppercase().as_bytes());
+    buf.into_boxed_slice()
 }
 
 // fn get_auth_challenge(username: &str) -> WowCliResult<Vec<u8>> {
@@ -99,11 +103,12 @@ impl From<std::io::Error> for WowCliError {
     }
 }
 
+#[allow(non_snake_case)]
 fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, SessionKey)> {
     let B = BigUint::from_bytes_le(&auth.B);
     let g = BigUint::from_bytes_le(&auth.g);
     let N = BigUint::from_bytes_le(&auth.N);
-    let s = BigUint::from_bytes_le(&auth.salt);
+    // let s = BigUint::from_bytes_le(&auth.salt);
 
     let k = BigUint::from(3u32);
 
@@ -122,7 +127,7 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
 
         let random_bytes = [
             0x4F, 0xBA, 0x40, 0x65, 0x3D, 0x98, 0xC9, 0xC3, 0x11, 0xF6, 0xC2, 0xD5, 0x5, 0xFA,
-            0x4A, 0xD4, 0x27, 0x16, 0x96, 0xFE, 0xDC, 0xE3, 0xD2, 0xA0, 0x25, 0x99, 0xCA, 0xD,
+            0x4A, 0xD4, 0x27, 0x16, 0x96, 0xFE, 0xDC, 0xE3, 0xD2, 0xA0, 0x21, 0x99, 0xCA, 0xD,
             0xFA, 0xED, 0xF3, 0xF6,
         ];
 
@@ -414,49 +419,37 @@ async fn main() -> WowCliResult<()> {
     let mut buf = vec![0; 1024];
     let (realms, session_key): (Vec<Realm>, _) = {
         let mut stream = tokio::net::TcpStream::connect(REALMSERVER).await?;
-        let (challenge, username_upper) = new_auth_challenge(USERNAME);
-        challenge
-            .write_as_wowprotopacket(
-                (AuthChallenge::SIZE_WITHOUT_HEADER + username_upper.len())
-                    .try_into()
-                    .expect("username length to fit u16"),
-                &mut stream,
-                Some(&username_upper),
-            )
-            .await?;
+        let challenge = new_auth_challenge(USERNAME);
+        let packet = match AuthChallenge::ref_from_bytes(&challenge) {
+            Ok(p) => p,
+            Err(e) => {
+                panic!("{e}")
+            }
+        };
+        packet.send(&mut stream).await?;
 
-        if let (Some(auth_response), _) = AuthResponse::read_as_rawpacket(&mut stream, &mut buf)
+        let (auth_response, _) = AuthResponse::read_as_rawpacket(&mut stream, &mut buf)
             .await
-            .map_err(|e| WowCliError::LoginFailed)?
+            .map_err(|e| WowCliError::LoginFailed)?;
+
+        println!("got authresponse {:X?}", auth_response);
+        if auth_response.opcode != commands::AUTH_LOGON_CHALLENGE
+            || auth_response.u1 != 0x0
+            || auth_response.u2 != 0x0
         {
-            println!("got authresponse {:X?}", auth_response);
-            if auth_response.opcode != commands::AUTH_LOGON_CHALLENGE
-                || auth_response.u1 != 0x0
-                || auth_response.u2 != 0x0
-            {
-                return Err(WowCliError::UnexpectedResponse);
-            }
+            return Err(WowCliError::UnexpectedResponse);
+        }
 
-            let (proof, session_key) = calculate_proof_SRP(auth_response)?;
-            stream.write_all(proof.as_bytes()).await?;
-            println!("sent client proof {proof:?}");
-            if let (Some(server_proof), _) =
-                AuthServerProof::read_as_rawpacket(&mut stream, &mut buf).await?
-            {
-                println!("got server proof {server_proof:?}");
-                if server_proof.cmd == commands::AUTH_LOGON_PROOF && server_proof.error == 0x0 {
-                    println!("login at {} as {} successful!", REALMSERVER, USERNAME);
-                } else {
-                    return Err(WowCliError::LoginFailed);
-                }
+        let (proof, session_key) = calculate_proof_SRP(auth_response)?;
+        proof.send(&mut stream).await?;
+        println!("sent client proof {proof:?}");
+        let (server_proof, _) = AuthServerProof::read_as_rawpacket(&mut stream, &mut buf).await?;
 
-                (vec![], session_key)
-            } else {
-                eprintln!("AuthServerProof failed");
-                return Err(WowCliError::LoginFailed);
-            }
+        println!("got server proof {server_proof:?}");
+        if server_proof.cmd == commands::AUTH_LOGON_PROOF && server_proof.error == 0x0 {
+            println!("login at {} as {} successful!", REALMSERVER, USERNAME);
+            (vec![], session_key)
         } else {
-            eprintln!("AuthResponse failed");
             return Err(WowCliError::LoginFailed);
         }
     };
@@ -469,26 +462,24 @@ async fn main() -> WowCliResult<()> {
             return Err(WowCliError::RealmIsOffline);
         }
         let mut stream = tokio::net::TcpStream::connect(&realm.address).await?;
-        if let (Some(realm_auth_challenge), _) =
+        let realm_auth_challenge =
             RealmAuthChallenge::read_as_wowprotopacket(&mut stream, &mut buf)
                 .await
-                .map_err(|e| WowCliError::NetworkError)?
-        {
-            let auth_session = get_auth_session(USERNAME, &session_key, &realm_auth_challenge)?;
-            stream.write_all(&auth_session).await?;
-            let (mut encrypt, mut decrypt) = init_crypto(&session_key)?;
-            let mut read_buf = [0; 4096];
-            loop {
-                // TODO: fix
-                // let bytes = stream.read(&mut read_buf)?;
-                // let mut processed: usize = 0;
-                // while processed < bytes {
-                //     let packet_header = decrypt_header(&mut read_buf[processed..], &mut decrypt);
-                //     println!("{packet_header} (read {}/{} bytes)", processed, bytes);
-                //     processed += packet_header.content_length + packet_header.header_length - 2;
-                // }
-                // std::thread::sleep(std::time::Duration::from_secs(1));
-            }
+                .map_err(|e| WowCliError::NetworkError)?;
+        let auth_session = get_auth_session(USERNAME, &session_key, &realm_auth_challenge)?;
+        stream.write_all(&auth_session).await?;
+        let (mut encrypt, mut decrypt) = init_crypto(&session_key)?;
+        let mut read_buf = [0; 4096];
+        loop {
+            // TODO: fix
+            // let bytes = stream.read(&mut read_buf)?;
+            // let mut processed: usize = 0;
+            // while processed < bytes {
+            //     let packet_header = decrypt_header(&mut read_buf[processed..], &mut decrypt);
+            //     println!("{packet_header} (read {}/{} bytes)", processed, bytes);
+            //     processed += packet_header.content_length + packet_header.header_length - 2;
+            // }
+            // std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
 

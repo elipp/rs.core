@@ -1,6 +1,8 @@
 use authserver::auth::calculate_verifier;
 use clap::Parser;
-use client::{generate_random_bytes, Salt, Verifier};
+use client::{generate_random_bytes, to_zero_padded_array_le, Salt, Verifier};
+use num_bigint::BigUint;
+use num_traits::Num;
 use tokio_postgres::NoTls;
 
 /// Simple program to greet a person
@@ -67,11 +69,13 @@ async fn main() -> Result<(), Error> {
         return Err(Error::AccountAlreadyExists(id));
     } else {
         // let salt: Salt = generate_random_bytes();
-        let salt: Salt = [
-            0xDB, 0x8A, 0xF4, 0x7A, 0x69, 0x43, 0x7C, 0xC0, 0x95, 0x5F, 0x14, 0xCF, 0xC9, 0x81,
-            0xDE, 0xB, 0x95, 0xBF, 0x7, 0xB, 0x5C, 0xAE, 0x6, 0x57, 0x51, 0x85, 0xFA, 0x7F, 0x76,
-            0x1B, 0x1, 0x8B,
-        ];
+        let salt = BigUint::from_str_radix(
+            "8b011b767ffa85515706ae5c0b07bf950bde81c9cf145f95c07c43697af48adb",
+            16,
+        )
+        .unwrap();
+        let salt = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
+
         let verifier = calculate_verifier(&username_upper, &args.password, &salt);
         let new_row = client
             .query_one(
