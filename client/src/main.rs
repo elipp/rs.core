@@ -66,7 +66,8 @@ fn new_auth_challenge(username: &str) -> Box<[u8]> {
     let challenge = AuthChallengeWithoutUsername {
         header: PktHeader::new(
             opcodes::AuthOpcode::AUTH_LOGON_CHALLENGE as u16,
-            size_of::<AuthChallengeWithoutUsername>() + username.as_bytes().len(),
+            size_of::<AuthChallengeWithoutUsername>() + username.as_bytes().len()
+                - size_of::<PktHeader>(),
         ),
         magic: WOW_MAGIC.to_owned(),
         version: WOTLK_VERSION.to_owned(),

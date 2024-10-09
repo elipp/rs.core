@@ -163,7 +163,7 @@ pub trait WowRawPacket: ZerocopyTraits {
 
 #[allow(async_fn_in_trait)]
 pub trait WowProtoPacket: ZerocopyTraits {
-    const EXPECTED_OPCODE: Option<u16>;
+    const OPCODE: Option<u16>;
     fn get_header(&self) -> PktHeader;
 
     async fn read_as_wowprotopacket<'b, R: AsyncReadExt + Unpin>(
@@ -176,7 +176,7 @@ pub trait WowProtoPacket: ZerocopyTraits {
 
         let header = PktHeader::read_from_bytes(&buf[..H]).unwrap();
 
-        match Self::EXPECTED_OPCODE {
+        match Self::OPCODE {
             Some(o) => {
                 if header.opcode.get() != o as u16 {
                     return Err(ProtocolError::Error(format!("Opcode doesn't match")));
@@ -218,12 +218,18 @@ pub trait WowProtoPacket: ZerocopyTraits {
 
 #[derive(FromBytes, KnownLayout, Immutable)]
 #[repr(C)]
-pub struct GenericProtoPacket {
+pub struct ProtoPacket {
     pub header: PktHeader,
     pub body: [u8],
 }
 
-impl WritePacket for GenericProtoPacket {
+impl ProtoPacket {
+    pub fn body_len(&self) -> usize {
+        (&self.body[..]).len()
+    }
+}
+
+impl WritePacket for ProtoPacket {
     async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError> {
         write
             .write_all(self.header.as_bytes())
@@ -628,7 +634,7 @@ impl WowRawPacket for AuthChallengeWithoutUsername {
 
 impl ZerocopyTraits for RealmAuthChallenge {}
 impl WowProtoPacket for RealmAuthChallenge {
-    const EXPECTED_OPCODE: Option<u16> = Some(opcodes::Opcode::SMSG_AUTH_CHALLENGE as u16);
+    const OPCODE: Option<u16> = Some(opcodes::Opcode::SMSG_AUTH_CHALLENGE as u16);
 
     fn get_header(&self) -> PktHeader {
         self.header
@@ -647,7 +653,7 @@ pub struct RealmListResult {
 
 impl ZerocopyTraits for RealmListResult {}
 impl WowProtoPacket for RealmListResult {
-    const EXPECTED_OPCODE: Option<u16> = Some(opcodes::Opcode::MSG_NULL_ACTION as u16);
+    const OPCODE: Option<u16> = Some(opcodes::Opcode::MSG_NULL_ACTION as u16);
 
     fn get_header(&self) -> PktHeader {
         self.header
