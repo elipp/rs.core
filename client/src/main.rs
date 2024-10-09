@@ -10,6 +10,7 @@ use opcodes::Opcode;
 use rand::Rng;
 use std::io::prelude::*;
 use std::mem::{size_of, MaybeUninit};
+use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -21,7 +22,10 @@ pub mod opcodes;
 pub mod warden;
 
 // const REALMSERVER: &str = "logon.warmane.com:3724";
-const REALMSERVER: &str = "127.0.0.1:3724";
+static REALMSERVER: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("AUTHSERVER_ADDRESS").unwrap_or_else(|_| "127.0.0.1:3724".to_owned())
+});
+
 // const REALMSERVER: &str = "logon.stormforge.gg:3724";
 const USERNAME: &str = "tlipp";
 const PASSWORD: &str = "kuusysi69"; // lol these are case-insensitive apparently
@@ -422,7 +426,7 @@ impl From<ProtocolError> for WowCliError {
 async fn main() -> WowCliResult<()> {
     let mut buf = vec![0; 1024];
     let (realms, session_key): (Vec<Realm>, _) = {
-        let mut stream = tokio::net::TcpStream::connect(REALMSERVER).await?;
+        let mut stream = tokio::net::TcpStream::connect(&*REALMSERVER).await?;
         let challenge = new_auth_challenge(USERNAME);
         let packet = match AuthChallenge::ref_from_bytes(&challenge) {
             Ok(p) => p,
@@ -451,7 +455,7 @@ async fn main() -> WowCliResult<()> {
 
         println!("got server proof {server_proof:?}");
         if server_proof.cmd == commands::AUTH_LOGON_PROOF && server_proof.error == 0x0 {
-            println!("login at {} as {} successful!", REALMSERVER, USERNAME);
+            println!("login at {} as {} successful!", &*REALMSERVER, USERNAME);
             (vec![], session_key)
         } else {
             return Err(WowCliError::LoginFailed);

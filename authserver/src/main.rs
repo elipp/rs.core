@@ -8,8 +8,8 @@ use tokio_postgres::NoTls;
 use deadpool_postgres::{GenericClient, ManagerConfig, RecyclingMethod, Runtime};
 
 use client::{
-    commands, generate_random_bytes, AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof,
-    AuthResponse, AuthServerProof, ProtocolError, WowProtoPacket, WowRawPacket,
+    commands, generate_random_bytes, AuthChallenge, AuthClientProof, AuthServerProof,
+    ProtocolError, WowRawPacket,
 };
 use core::str;
 use std::env;
@@ -42,7 +42,7 @@ pub type PgPool = deadpool_postgres::Pool;
 async fn main() -> Result<(), Box<dyn Error>> {
     let addr = env::args()
         .nth(1)
-        .unwrap_or_else(|| "0.0.0.0:3724".to_string());
+        .unwrap_or_else(|| "0.0.0.0:3725".to_string());
 
     let listener = TcpListener::bind(&addr).await?;
     println!("Listening on: {}", addr);
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         challenge.get_client_os_platform()?
                     );
 
-                    let response = new_auth_response(&account.salt, &account.verifier);
+                    let (response, _b) = new_auth_response(&account.salt, &account.verifier);
                     socket
                         .write_all(response.as_bytes())
                         .await
@@ -107,7 +107,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let (proof, _) =
                         AuthClientProof::read_as_rawpacket(&mut socket, &mut buf).await?;
                     eprintln!("got client proof {proof:?}");
-                    proof.verify(&account.salt, &account.verifier, &username)?;
+                    proof.verify(&account.salt, &account.verifier, &username, _b)?;
 
                     let server_proof = AuthServerProof {
                         cmd: commands::AUTH_LOGON_PROOF,

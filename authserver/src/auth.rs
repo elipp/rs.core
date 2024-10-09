@@ -134,10 +134,6 @@ mod test {
         let u = BigUint::from_bytes_le(&ABhash);
         let S = (&A * (v.modpow(&u, &N))).modpow(&_b, &N);
 
-        // | vModExpU_N = 50157CADC4E87315F0BFAC91792FD412B27951B07E96D29A79B1054240309AE6
-        // | AvModExpU_N = 1DD9A377D098BB16B6E58C2F63025E5A39BAE8905B5C8251F6E11D7DE00A626CCB789D064F92171844E6674F188A6885D2C459DA00FCACF79976FEF056858584
-        // | final = 2025C04D15B7F228F78711B5D7D8549E753748907D4DBACDBF62AF3E1E9F333C
-
         let three = BigUint::from(3u32);
 
         assert_eq!(
@@ -327,7 +323,7 @@ mod test {
             "45d9d906286c34051b6d5240383c9a02b00a1a58ff75385f4911f5300f482c04"
         );
 
-        let B = AuthResponse::calculate_B(_b, BigUint::from_bytes_be(&v));
+        let B = AuthResponse::calculate_B(&_b, &BigUint::from_bytes_be(&v));
 
         assert_eq!(
             &ah_be(&B.to_bytes_be()),
@@ -361,7 +357,7 @@ mod test {
         )
         .unwrap();
 
-        let calculated_B = AuthResponse::calculate_B(_b, BigUint::from_bytes_be(&v));
+        let calculated_B = AuthResponse::calculate_B(&_b, &BigUint::from_bytes_be(&v));
         println!("{} should be {}", Ah(&B), Ah(&calculated_B));
         assert_eq!(B, calculated_B);
     }

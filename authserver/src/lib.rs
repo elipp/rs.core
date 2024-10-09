@@ -39,30 +39,28 @@ impl TryFrom<tokio_postgres::Row> for Account {
 }
 
 #[allow(non_snake_case)]
-pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> AuthResponse {
+pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> (AuthResponse, BigUint) {
     let _b = generate_random_bytes::<32>();
     let b = BigUint::from_bytes_le(&_b);
-    // let b = BigUint::from_str_radix(
-    //     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-    //     16,
-    // )
-    // .unwrap();
     let v = BigUint::from_bytes_be(verifier);
 
-    let B = AuthResponse::calculate_B(b, v);
+    let B = AuthResponse::calculate_B(&b, &v);
     let B_bytes = to_zero_padded_array_le::<32>(&B.to_bytes_le());
 
-    AuthResponse {
-        opcode: 0x0,
-        u1: 0x0,
-        u2: crate::auth::AuthResult::Success as u8,
-        B: B_bytes,
-        u3: 0x1,
-        g: [srp6::_g],
-        u4: 0x32,
-        N: srp6::N_BYTES_LE.to_owned(),
-        salt: salt.to_owned(),
-        unk1: generate_random_bytes(),
-        securityFlags: 0x0,
-    }
+    (
+        AuthResponse {
+            opcode: 0x0,
+            u1: 0x0,
+            u2: crate::auth::AuthResult::Success as u8,
+            B: B_bytes,
+            u3: 0x1,
+            g: [srp6::_g],
+            u4: 0x32,
+            N: srp6::N_BYTES_LE.to_owned(),
+            salt: salt.to_owned(),
+            unk1: generate_random_bytes(),
+            securityFlags: 0x0,
+        },
+        b,
+    )
 }

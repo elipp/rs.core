@@ -266,11 +266,6 @@ where
     T: IntoBytes + Immutable + ?Sized,
 {
     async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError> {
-        eprintln!(
-            "sending {} bytes ({:?})",
-            self.as_bytes().len(),
-            self.as_bytes()
-        );
         write
             .write_all(self.as_bytes())
             .await
@@ -400,21 +395,21 @@ impl WowRawPacket for AuthResponse {
 }
 
 impl AuthResponse {
-    pub fn calculate_B(_b: BigUint, verifier: BigUint) -> BigUint {
+    pub fn calculate_B(_b: &BigUint, verifier: &BigUint) -> BigUint {
         use srp6::{g, N};
         let three = BigUint::from(3u32);
-        //         ac-authserver  | _g.ModExp(b, _N): 54557EF5028DE793856E56036B146798D71190E0D263D3BFABE50D470C1F60FE
-        // ac-authserver  | _g.ModExp(b, _N) + (v * 3): 0125E30A077BD283A2D7B64CC413CA35A0E72FDFEBD0C37CDD871AECD739F7E50A
-        // ac-authserver  | (_g.ModExp(b, _N) + (v * 3) % N): 134C414A680FDCEB5C5B95ADC1BD94FAD72C7CCE5144BFBE30A1E7C8E57AAD9C
+        println!("g: {}", Ah(&g));
+        println!("_b: {}", Ah(&_b));
+        println!("_N: {}", Ah(&*N));
         println!("_g.ModExp(b, _N): {}", Ah(&g.modpow(&_b, &N)));
         println!(
             "_g.ModExp(b, _N) + (v * 3): {}",
-            Ah(&(g.modpow(&_b, &N) + (&verifier * &three)))
+            Ah(&(g.modpow(&_b, &N) + (verifier * &three)))
         );
 
         println!(
             "(_g.ModExp(b, _N) + (v * 3)) % N: {}",
-            Ah(&((g.modpow(&_b, &N) + (&verifier * &three)) % &*N))
+            Ah(&((g.modpow(&_b, &N) + (verifier * &three)) % &*N))
         );
         (g.modpow(&_b, &N) + (verifier * three)) % &*N
     }
@@ -531,16 +526,9 @@ impl AuthClientProof {
         salt: &Salt,
         verifier: &Verifier,
         username_upper: &str,
+        _b: BigUint,
     ) -> Result<SessionKey, ProtocolError> {
         use srp6::{g, N};
-
-        // let _b_bytes = generate_random_bytes::<32>();
-        // let _b = BigUint::from_bytes_le(&_b_bytes);
-        let _b = BigUint::from_str_radix(
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-            16,
-        )
-        .unwrap();
 
         let A = BigUint::from_bytes_le(&self.A);
 
@@ -554,8 +542,7 @@ impl AuthClientProof {
             )));
         }
 
-        let three = BigUint::from(3u32);
-        let B = (g.modpow(&_b, &N) + (&v * &three)) % &*N;
+        let B = AuthResponse::calculate_B(&_b, &v);
 
         let ABhash = sha1_hash_iter(
             A.to_bytes_le()
