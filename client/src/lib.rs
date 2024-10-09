@@ -112,6 +112,15 @@ pub struct PktHeader {
     length: u16,
 }
 
+impl PktHeader {
+    pub fn new(opcode: u16, length: usize) -> Self {
+        Self {
+            opcode: (opcode as u16).into(),
+            length: length as u16,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ProtocolError {
     BadMagic,
@@ -230,8 +239,9 @@ impl WritePacket for GenericProtoPacket {
 }
 
 #[repr(C, packed)]
-#[derive(IntoBytes, FromBytes, KnownLayout, Unaligned, Immutable)]
+#[derive(Debug, IntoBytes, FromBytes, KnownLayout, Unaligned, Immutable)]
 pub struct AuthChallengeWithoutUsername {
+    pub header: PktHeader,
     pub magic: [u8; 4],
     pub version: [u8; 3],
     pub build: u16,
@@ -250,7 +260,11 @@ where
     T: IntoBytes + Immutable + ?Sized,
 {
     async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError> {
-        eprintln!("sending {} bytes", self.as_bytes().len());
+        eprintln!(
+            "sending {} bytes ({:?})",
+            self.as_bytes().len(),
+            self.as_bytes()
+        );
         write
             .write_all(self.as_bytes())
             .await
@@ -263,6 +277,17 @@ where
 pub struct AuthChallenge {
     pub header: AuthChallengeWithoutUsername,
     pub username: [u8],
+}
+
+impl std::fmt::Display for AuthChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AuthChallenge {{ header: {:?}, username: {:?} }}",
+            self.header,
+            &self.username[..]
+        )
+    }
 }
 
 impl AuthChallenge {

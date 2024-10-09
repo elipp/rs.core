@@ -1,7 +1,7 @@
 use client::{
     commands, interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le,
     AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof, AuthResponse, AuthServerProof,
-    ProtocolError, RealmAuthChallenge, SessionKey, WowProtoPacket, WowRawPacket, WowRc4,
+    PktHeader, ProtocolError, RealmAuthChallenge, SessionKey, WowProtoPacket, WowRawPacket, WowRc4,
     WritePacket, WOTLK_BUILD, WOTLK_VERSION, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
 };
 use num_bigint::BigUint;
@@ -64,6 +64,10 @@ type WowCliResult<T> = Result<T, WowCliError>;
 fn new_auth_challenge(username: &str) -> Box<[u8]> {
     let mut buf = Vec::new();
     let challenge = AuthChallengeWithoutUsername {
+        header: PktHeader::new(
+            opcodes::AuthOpcode::AUTH_LOGON_CHALLENGE as u16,
+            size_of::<AuthChallengeWithoutUsername>() + username.as_bytes().len(),
+        ),
         magic: WOW_MAGIC.to_owned(),
         version: WOTLK_VERSION.to_owned(),
         build: WOTLK_BUILD.to_owned(),
