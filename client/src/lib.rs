@@ -21,6 +21,8 @@ use zerocopy::{FromBytes, FromZeros, Unaligned};
 
 const SHA_DIGEST_LENGTH: usize = 20;
 
+pub type Sha1Digest = [u8; SHA_DIGEST_LENGTH];
+
 pub mod wotlk {
     pub const BUILD: u16 = 12340;
     pub const VERSION: [u8; 3] = [3, 3, 5];
@@ -63,7 +65,7 @@ pub fn to_zero_padded_array_le<const N: usize>(vec: &[u8]) -> [u8; N] {
     array
 }
 
-pub fn sha1_hash<D: AsRef<[u8]>>(data: D) -> [u8; SHA_DIGEST_LENGTH] {
+pub fn sha1_hash<D: AsRef<[u8]>>(data: D) -> Sha1Digest {
     let mut sha1 = Sha1::new();
     sha1.update(data);
     let hash = sha1.finalize();
@@ -72,7 +74,7 @@ pub fn sha1_hash<D: AsRef<[u8]>>(data: D) -> [u8; SHA_DIGEST_LENGTH] {
         .expect("sha1 digest length to be 20")
 }
 
-pub fn sha1_hmac(key: &[u8], data: &[u8]) -> Result<[u8; SHA_DIGEST_LENGTH], InvalidLength> {
+pub fn sha1_hmac(key: &[u8], data: &[u8]) -> Result<Sha1Digest, InvalidLength> {
     let mut hmac = Hmac::<Sha1>::new_from_slice(key)?;
     hmac.update(data);
     let encrypt_digest = hmac.finalize();
@@ -83,7 +85,7 @@ pub fn sha1_hmac(key: &[u8], data: &[u8]) -> Result<[u8; SHA_DIGEST_LENGTH], Inv
         .expect("sha1 hmac digest length to be 20"))
 }
 
-pub fn sha1_hash_iter<D: Iterator<Item = u8>>(data: D) -> [u8; SHA_DIGEST_LENGTH] {
+pub fn sha1_hash_iter<D: Iterator<Item = u8>>(data: D) -> Sha1Digest {
     let mut sha1 = Sha1::new();
     sha1.update(data.collect::<Vec<_>>());
     sha1.finalize()
@@ -117,21 +119,29 @@ pub struct AuthProtoPacketHeader {
     length: u16,
 }
 
-impl AuthProtoPacketHeader {
-    pub fn new(opcode: u16, length: usize) -> Self {
-        Self {
-            opcode: (opcode as u16).into(),
-            length: length as u16,
-        }
+impl AuthProtoPacketHeader {}
+
+impl std::fmt::Display for ProtoPacketHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let opcode = self.opcode();
+        write!(
+            f,
+            "{} {{ opcode: 0x{:X}, length: {} }}",
+            std::any::type_name_of_val(self),
+            opcode,
+            self.packet_length()
+        )
     }
 }
 
 impl std::fmt::Display for AuthProtoPacketHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let opcode = self.opcode();
         write!(
             f,
-            "AuthProtoPacketHeader {{ opcode: 0x{:X}, length: {}}}",
-            self.opcode,
+            "{} {{ opcode: 0x{:X}, length: {} }}",
+            std::any::type_name_of_val(self),
+            opcode,
             self.packet_length()
         )
     }
@@ -144,15 +154,40 @@ pub struct ProtoPacketHeader {
     opcode: u16,
 }
 
-impl std::fmt::Display for ProtoPacketHeader {
+#[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+pub struct ClientPacketHeader {
+    length: network_endian::U16,
+    opcode: u32,
+}
+
+impl std::fmt::Display for ClientPacketHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let opcode = self.opcode;
+        let opcode = self.opcode();
         write!(
             f,
-            "ProtoPacketHeader {{ opcode: 0x{:X}, length: {}}}",
+            "{} {{ opcode: 0x{:X}, length: {} }}",
+            std::any::type_name_of_val(self),
             opcode,
             self.packet_length()
         )
+    }
+}
+
+impl PacketHeader for ClientPacketHeader {
+    fn packet_length(&self) -> usize {
+        self.length.into()
+    }
+
+    fn opcode(&self) -> u16 {
+        self.opcode as u16
+    }
+
+    fn new(opcode: u16, length: usize) -> Self {
+        Self {
+            length: (length as u16).into(),
+            opcode: opcode as u32,
+        }
     }
 }
 
@@ -174,6 +209,7 @@ pub enum ProtocolError {
 pub trait PacketHeader: Sized {
     fn packet_length(&self) -> usize;
     fn opcode(&self) -> u16;
+    fn new(opcode: u16, length: usize) -> Self;
 }
 
 impl PacketHeader for AuthProtoPacketHeader {
@@ -183,15 +219,29 @@ impl PacketHeader for AuthProtoPacketHeader {
     fn opcode(&self) -> u16 {
         self.opcode.get()
     }
+
+    fn new(opcode: u16, length: usize) -> Self {
+        Self {
+            opcode: (opcode as u16).into(),
+            length: length as u16,
+        }
+    }
 }
 
 impl PacketHeader for ProtoPacketHeader {
     fn packet_length(&self) -> usize {
-        self.length.get() as usize
+        self.length.get() as usize - size_of_val(&self.length)
     }
 
     fn opcode(&self) -> u16 {
         self.opcode
+    }
+
+    fn new(opcode: u16, length: usize) -> Self {
+        Self {
+            opcode,
+            length: (length as u16).into(),
+        }
     }
 }
 
@@ -259,12 +309,6 @@ where
 
         let header = Header::read_from_bytes(&buf[..Self::H])
             .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?;
-
-        println!(
-            "recv(): trying to read a packet body of {} bytes (opcode {})",
-            header.packet_length(),
-            header.opcode(),
-        );
 
         read.read_exact(&mut buf[Self::H..Self::H + header.packet_length()])
             .await
@@ -652,23 +696,79 @@ pub struct RealmAuthSessionResponse {
     body: [u8],
 }
 
-impl RealmAuthSessionResponse {
+// struct AuthSession
+// {
+//     uint32 BattlegroupID = 0;
+//     uint32 LoginServerType = 0;
+//     uint32 RealmID = 0;
+//     uint32 Build = 0;
+//     std::array<uint8, 4> LocalChallenge = {};
+//     uint32 LoginServerID = 0;
+//     uint32 RegionID = 0;
+//     uint64 DosResponse = 0;
+//     Acore::Crypto::SHA1::Digest Digest = {};
+//     std::string Account;
+//     ByteBuffer AddonInfo;
+// };
+
+#[derive(IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
+#[repr(C, packed)]
+pub struct WotlkAuthResponseHeader {
+    build: u32,
+    login_server_id: u32,
+    battlegroup_id: u32,
+    login_server_type: u32,
+    realm_id: u32,
+    local_challenge: [u8; 4],
+    region_id: u32,
+    dos_response: u64,
+    digest: Sha1Digest,
+}
+
+// // Read the content of the packet
+// recvPacket >> authSession->Build;
+// recvPacket >> authSession->LoginServerID;
+// recvPacket >> authSession->Account;
+// recvPacket >> authSession->LoginServerType;
+// recvPacket.read(authSession->LocalChallenge);
+// recvPacket >> authSession->RegionID;
+// recvPacket >> authSession->BattlegroupID;
+// recvPacket >> authSession->RealmID;               // realmId from auth_database.realmlist table
+// recvPacket >> authSession->DosResponse;
+
+#[derive(IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
+#[repr(C, packed)]
+pub struct WotlkAuthResponse {
+    header: WotlkAuthResponseHeader,
+    rest: [u8],
+}
+
+impl WotlkAuthResponse {
     pub fn new<'b>(
         buf: &'b mut [u8],
         username: &str,
         realm_id: u32,
         challenge_seed: u32,
         session_key: &SessionKey,
-    ) -> Result<&'b ProtoPacket<ProtoPacketHeader, Self>, ProtocolError> {
+    ) -> Result<&'b ProtoPacket<ClientPacketHeader, WotlkAuthResponse>, ProtocolError> {
         macro_rules! w {
             ($cursor:expr, $data:expr) => {
                 std::io::Write::write_all(&mut $cursor, $data.as_bytes()).unwrap()
             };
         }
-        const L: usize = 0x3D;
-
+        let header = WotlkAuthResponseHeader {
+            battlegroup_id: 0,
+            login_server_type: 0,
+            realm_id,
+            build: 0,
+            local_challenge: todo!(),
+            login_server_id: todo!(),
+            region_id: todo!(),
+            dos_response: todo!(),
+            digest: todo!(),
+        };
         let username_upper = username.to_uppercase();
-        let header = AuthProtoPacketHeader::new(
+        let header = ClientPacketHeader::new(
             opcodes::Opcode::CMSG_AUTH_SESSION as u16,
             L + username.len(),
         );
@@ -699,10 +799,9 @@ impl RealmAuthSessionResponse {
             cursor.position() as usize
         };
 
-        Ok(
-            ProtoPacket::<ProtoPacketHeader, Self>::ref_from_bytes(&buf[..packet_len])
-                .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?,
-        )
+        println!("{:x?}", &buf[..packet_len]);
+        Ok(ProtoPacket::<_, Self>::ref_from_bytes(&buf[..packet_len])
+            .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?)
     }
 }
 

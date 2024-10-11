@@ -2,7 +2,7 @@ use client::{
     commands::{self, CMD_REALM_LIST},
     interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le, wotlk,
     AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof, AuthProtoPacketHeader,
-    AuthResponse, AuthServerProof, ProtoPacket, ProtoPacketHeader, ProtocolError,
+    AuthResponse, AuthServerProof, PacketHeader, ProtoPacket, ProtoPacketHeader, ProtocolError,
     RealmAuthChallenge, RealmAuthSessionResponse, RealmListResult, RecvPacket, SendPacket,
     SessionKey, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
 };
@@ -430,11 +430,12 @@ async fn main() -> WowCliResult<()> {
 
         let auth_session =
             RealmAuthSessionResponse::new(&mut buf, USERNAME, 1, challenge.seed, &session_key)?;
+
+        println!("{}", auth_session.header);
         auth_session.send(&mut stream).await?;
 
         let (mut encrypt, mut decrypt) = init_crypto(&session_key)?;
         loop {
-            // TODO: fix
             let bytes = stream.read(&mut buf).await?;
             let mut processed: usize = 0;
             while processed < bytes {
