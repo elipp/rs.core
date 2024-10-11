@@ -16,7 +16,7 @@ use sha1::{Digest, Sha1};
 use rand::Rng;
 use srp6::N_BYTES_LE;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use zerocopy::{byteorder::network_endian, Immutable, IntoBytes, KnownLayout};
+use zerocopy::{byteorder::network_endian, little_endian, Immutable, IntoBytes, KnownLayout};
 use zerocopy::{FromBytes, FromZeros, Unaligned};
 
 const SHA_DIGEST_LENGTH: usize = 20;
@@ -154,6 +154,66 @@ pub struct ProtoPacketHeader {
     opcode: u16,
 }
 
+pub type U24 = [u8; 3];
+
+#[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+pub struct BigProtoPacketHeader {
+    length: U24,
+    opcode: u16,
+}
+
+fn transform_to_u32(u: &U24) -> u32 {
+    let b0 = u[0] as u32;
+    let b1 = u[1] as u32;
+    let b2 = (u[2] & 0x7F) as u32;
+
+    (b2 << 16) | (b1 << 8) | b0
+}
+
+fn reverse_from_u32(u: u32) -> U24 {
+    let b0 = (u & 0xFF) as u8;
+    let b1 = ((u >> 8) & 0xFF) as u8;
+    let b2 = ((u >> 16) & 0x7F) as u8 | 0x80;
+
+    [b0, b1, b2]
+}
+
+impl PacketHeader for BigProtoPacketHeader {
+    fn packet_length(&self) -> usize {
+        transform_to_u32(&self.length) as usize
+    }
+
+    fn opcode(&self) -> u16 {
+        self.opcode
+    }
+
+    fn new(opcode: u16, length: usize) -> Self {
+        Self {
+            opcode,
+            length: reverse_from_u32(length as u32),
+        }
+    }
+
+    fn resize(&mut self, new_size: usize) {
+        self.length = reverse_from_u32(new_size as u32)
+    }
+}
+
+pub enum PacketHeaderType {
+    Packet(ProtoPacketHeader),
+    BigPacket(BigProtoPacketHeader),
+}
+
+impl PacketHeaderType {
+    pub fn packet_length(&self) -> usize {
+        match self {
+            PacketHeaderType::Packet(p) => p.packet_length(),
+            PacketHeaderType::BigPacket(p) => p.packet_length(),
+        }
+    }
+}
+
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
 pub struct ClientPacketHeader {
@@ -189,6 +249,10 @@ impl PacketHeader for ClientPacketHeader {
             opcode: opcode as u32,
         }
     }
+
+    fn resize(&mut self, new_size: usize) {
+        self.length = (new_size as u16).into();
+    }
 }
 
 #[derive(Debug)]
@@ -210,6 +274,7 @@ pub trait PacketHeader: Sized {
     fn packet_length(&self) -> usize;
     fn opcode(&self) -> u16;
     fn new(opcode: u16, length: usize) -> Self;
+    fn resize(&mut self, new_size: usize);
 }
 
 impl PacketHeader for AuthProtoPacketHeader {
@@ -225,6 +290,10 @@ impl PacketHeader for AuthProtoPacketHeader {
             opcode: (opcode as u16).into(),
             length: length as u16,
         }
+    }
+
+    fn resize(&mut self, new_size: usize) {
+        self.length = new_size as u16;
     }
 }
 
@@ -242,6 +311,10 @@ impl PacketHeader for ProtoPacketHeader {
             opcode,
             length: (length as u16).into(),
         }
+    }
+
+    fn resize(&mut self, new_size: usize) {
+        self.length = (new_size as u16).into()
     }
 }
 
@@ -690,12 +763,6 @@ pub struct RealmListResult {
     pub body: [u8],
 }
 
-#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C, packed)]
-pub struct RealmAuthSessionResponse {
-    body: [u8],
-}
-
 // struct AuthSession
 // {
 //     uint32 BattlegroupID = 0;
@@ -713,33 +780,25 @@ pub struct RealmAuthSessionResponse {
 
 #[derive(IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
 #[repr(C, packed)]
-pub struct WotlkAuthResponseHeader {
-    build: u32,
+pub struct WotlkAuthResponseHeaderFirst {
+    build: little_endian::U16,
     login_server_id: u32,
-    battlegroup_id: u32,
-    login_server_type: u32,
-    realm_id: u32,
-    local_challenge: [u8; 4],
-    region_id: u32,
-    dos_response: u64,
-    digest: Sha1Digest,
 }
 
-// // Read the content of the packet
-// recvPacket >> authSession->Build;
-// recvPacket >> authSession->LoginServerID;
-// recvPacket >> authSession->Account;
-// recvPacket >> authSession->LoginServerType;
-// recvPacket.read(authSession->LocalChallenge);
-// recvPacket >> authSession->RegionID;
-// recvPacket >> authSession->BattlegroupID;
-// recvPacket >> authSession->RealmID;               // realmId from auth_database.realmlist table
-// recvPacket >> authSession->DosResponse;
+#[derive(IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
+#[repr(C, packed)]
+pub struct WotlkAuthResponseHeaderSecond {
+    login_server_type: u32,
+    local_challenge: [u8; 4],
+    region_id: u32,
+    battlegroup_id: u32,
+    realm_id: u32,
+    dos_response: u64,
+}
 
 #[derive(IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
 #[repr(C, packed)]
 pub struct WotlkAuthResponse {
-    header: WotlkAuthResponseHeader,
     rest: [u8],
 }
 
@@ -751,40 +810,35 @@ impl WotlkAuthResponse {
         challenge_seed: u32,
         session_key: &SessionKey,
     ) -> Result<&'b ProtoPacket<ClientPacketHeader, WotlkAuthResponse>, ProtocolError> {
-        macro_rules! w {
+        macro_rules! write_bytes {
             ($cursor:expr, $data:expr) => {
                 std::io::Write::write_all(&mut $cursor, $data.as_bytes()).unwrap()
             };
         }
-        let header = WotlkAuthResponseHeader {
-            battlegroup_id: 0,
-            login_server_type: 0,
-            realm_id,
-            build: 0,
-            local_challenge: todo!(),
-            login_server_id: todo!(),
-            region_id: todo!(),
-            dos_response: todo!(),
-            digest: todo!(),
-        };
         let username_upper = username.to_uppercase();
-        let header = ClientPacketHeader::new(
-            opcodes::Opcode::CMSG_AUTH_SESSION as u16,
-            L + username.len(),
-        );
+        let header = ClientPacketHeader::new(opcodes::Opcode::CMSG_AUTH_SESSION as u16, 0);
+
         let our_seed = rand::thread_rng().gen::<u32>();
         let packet_len = {
             let mut cursor = std::io::Cursor::new(&mut buf[..]);
-            w!(cursor, header);
-            w!(cursor, (wotlk::BUILD as u32).to_le_bytes());
-            w!(cursor, [0u8; 4]);
-            w!(cursor, username_upper);
-            w!(cursor, [0u8]); // null terminador
-            w!(cursor, [0u8; 4]);
-            w!(cursor, our_seed.to_le_bytes());
-            w!(cursor, [0u8; 8]);
-            w!(cursor, realm_id.to_le_bytes());
-            w!(cursor, [0u8; 8]);
+            let first = WotlkAuthResponseHeaderFirst {
+                build: wotlk::BUILD.into(),
+                login_server_id: 0,
+            };
+
+            let second = WotlkAuthResponseHeaderSecond {
+                login_server_type: 0,
+                local_challenge: [0; 4],
+                region_id: 0,
+                battlegroup_id: 0,
+                realm_id,
+                dos_response: 0,
+            };
+            write_bytes!(cursor, header);
+            write_bytes!(cursor, first);
+            write_bytes!(cursor, username_upper);
+            write_bytes!(cursor, 0u8); // null terminador
+            write_bytes!(cursor, second);
 
             let mut hashbuf = Vec::new();
             hashbuf.extend(username_upper.as_bytes());
@@ -793,15 +847,21 @@ impl WotlkAuthResponse {
             hashbuf.extend(challenge_seed.to_le_bytes());
             hashbuf.extend(session_key);
             let hashbuf_sha = sha1_hash(&hashbuf);
-            w!(cursor, hashbuf_sha);
-            w!(cursor, [0u8; 4]);
+            write_bytes!(cursor, hashbuf_sha);
+
+            let addon_info_length = 0;
+            write_bytes!(cursor, addon_info_length);
 
             cursor.position() as usize
         };
 
-        println!("{:x?}", &buf[..packet_len]);
-        Ok(ProtoPacket::<_, Self>::ref_from_bytes(&buf[..packet_len])
-            .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?)
+        let packet =
+            ProtoPacket::<ClientPacketHeader, Self>::mut_from_bytes(&mut buf[..packet_len])
+                .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?;
+
+        packet.header.resize(packet_len - 2);
+
+        Ok(packet)
     }
 }
 

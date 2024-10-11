@@ -2,9 +2,10 @@ use client::{
     commands::{self, CMD_REALM_LIST},
     interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le, wotlk,
     AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof, AuthProtoPacketHeader,
-    AuthResponse, AuthServerProof, PacketHeader, ProtoPacket, ProtoPacketHeader, ProtocolError,
-    RealmAuthChallenge, RealmAuthSessionResponse, RealmListResult, RecvPacket, SendPacket,
-    SessionKey, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
+    AuthResponse, AuthServerProof, BigProtoPacketHeader, PacketHeader, PacketHeaderType,
+    ProtoPacket, ProtoPacketHeader, ProtocolError, RealmAuthChallenge, RealmListResult, RecvPacket,
+    SendPacket, SessionKey, WotlkAuthResponse, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY,
+    WOW_MAGIC,
 };
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -14,7 +15,9 @@ use std::io::Cursor;
 use std::mem::size_of;
 use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+use zerocopy::{
+    little_endian, FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned,
+};
 
 use rc4::{Key, Rc4, StreamCipher};
 
@@ -347,6 +350,36 @@ impl std::fmt::Display for ServerPacketHeader {
     }
 }
 
+// pub enum Packet {
+//     SmsgWardenData(WardenData),
+// }
+
+pub async fn read_one_encrypted<R>(
+    read: &mut R,
+    buf: &mut [u8],
+    decrypt: &mut WowRc4,
+) -> Result<(), ProtocolError>
+where
+    R: AsyncReadExt + Unpin,
+{
+    read.read_exact(&mut buf[..1])
+        .await
+        .map_err(|e| ProtocolError::NetworkError(format!("{e:?}")))?;
+    decrypt.apply_keystream(&mut buf[..1]);
+
+    let header = if (buf[0] & 0x80) > 0 {
+        println!("have big packet");
+        read.read_exact(&mut buf[1..5]).await.unwrap();
+        decrypt.apply_keystream(&mut buf[1..5]);
+        PacketHeaderType::BigPacket(BigProtoPacketHeader::read_from_bytes(&buf[..5]).unwrap())
+    } else {
+        read.read_exact(&mut buf[1..4]).await.unwrap();
+        decrypt.apply_keystream(&mut buf[1..4]);
+        PacketHeaderType::Packet(ProtoPacketHeader::read_from_bytes(&buf[..5]).unwrap())
+    };
+    Ok(())
+}
+
 fn decrypt_header(buf: &mut [u8], decrypt: &mut WowRc4) -> ServerPacketHeader {
     decrypt.apply_keystream(&mut buf[..1]);
     let header_length = if (buf[0] & 0x80) > 0 {
@@ -426,17 +459,16 @@ async fn main() -> WowCliResult<()> {
 
         let challenge = realm_auth_challenge.body.clone();
 
-        println!("{realm_auth_challenge}");
-
         let auth_session =
-            RealmAuthSessionResponse::new(&mut buf, USERNAME, 1, challenge.seed, &session_key)?;
+            WotlkAuthResponse::new(&mut buf, USERNAME, 1, challenge.seed, &session_key)?;
 
         println!("{}", auth_session.header);
         auth_session.send(&mut stream).await?;
 
         let (mut encrypt, mut decrypt) = init_crypto(&session_key)?;
         loop {
-            let bytes = stream.read(&mut buf).await?;
+            let bytes = stream.read_exact(&mut buf[..1]).await?;
+
             let mut processed: usize = 0;
             while processed < bytes {
                 let packet_header = decrypt_header(&mut buf[processed..], &mut decrypt);
