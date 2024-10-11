@@ -89,6 +89,7 @@ dependencies = [
  "rand",
  "tokio",
  "tokio-postgres",
+ "tracing",
  "zerocopy 0.8.3",
 ]
 

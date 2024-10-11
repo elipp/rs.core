@@ -8,8 +8,8 @@ use tokio_postgres::NoTls;
 use deadpool_postgres::{GenericClient, ManagerConfig, RecyclingMethod, Runtime};
 
 use client::{
-    commands, generate_random_bytes, AuthChallenge, AuthClientProof, AuthServerProof, ProtoPacket,
-    ProtocolError, RecvPacket, WowRawPacket,
+    commands, generate_random_bytes, AuthChallenge, AuthClientProof, AuthProtoPacketHeader,
+    AuthServerProof, ProtoPacket, ProtocolError, RecvPacket,
 };
 use core::str;
 use std::env;
@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| "0.0.0.0:3725".to_string());
 
     let listener = TcpListener::bind(&addr).await?;
-    println!("Listening on: {}", addr);
+    tracing::info!("Listening on: {}", addr);
 
     let mut cfg = deadpool_postgres::Config::new();
     cfg.host = Some(String::from("127.0.0.1"));
@@ -70,12 +70,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .peer_addr()
                     .map_err(|e| AuthError::Error(format!("couldn't get peer addr: {e:?}")))?;
 
-                let challenge = ProtoPacket::<AuthChallenge>::recv(&mut socket, &mut buf).await?;
-                eprintln!(
-                    "{:?}, {:?}",
-                    challenge.body.header,
-                    &challenge.body.username[..]
-                );
+                let challenge = ProtoPacket::<AuthProtoPacketHeader, AuthChallenge>::recv(
+                    &mut socket,
+                    &mut buf,
+                )
+                .await?;
 
                 let username = match str::from_utf8(&challenge.body.username) {
                     Ok(username) => username.to_owned(),
@@ -98,7 +97,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 {
                     let account: Account = account.try_into()?;
 
-                    println!(
+                    tracing::info!(
                         "username {username} logging in from {ip:?} {} {:?}",
                         challenge.body.get_client_language()?,
                         challenge.body.get_client_os_platform()?
@@ -110,15 +109,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .await
                         .expect("write authresponse failed");
 
-                    let (proof, _) =
-                        AuthClientProof::read_as_rawpacket(&mut socket, &mut buf).await?;
-                    eprintln!("got client proof {proof:?}");
+                    let proof = AuthClientProof::recv(&mut socket, &mut buf).await?;
+                    tracing::info!("got client proof {proof:?}");
                     proof.verify(&account.salt, &account.verifier, &username, _b)?;
 
                     let server_proof = AuthServerProof {
                         cmd: commands::AUTH_LOGON_PROOF,
                         error: AuthResult::Success as u8,
-                        M2: generate_random_bytes(),
+                        M2: generate_random_bytes(), // TODO: calculate this shit properly
                         accountFlags: 0x0,
                         surveyId: 0x0,
                         unkFlags: 0x0,
@@ -130,14 +128,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             ProtocolError::Error(format!("writing AuthServerProof failed: {e:?}"))
                         })?;
                 } else {
-                    eprintln!("couldn't find user {username} from db");
+                    tracing::warn!("couldn't find user {username} from db");
                     todo!("write unknown account packet to socket and exit")
                 }
                 Ok(())
             }
             .await;
             if let Err(e) = res {
-                eprintln!("server error: {e:?}");
+                tracing::error!("server error: {e:?}");
             }
         });
     }

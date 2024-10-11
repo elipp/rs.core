@@ -1,10 +1,12 @@
 use core::str;
+use std::fmt::LowerHex;
 
 mod opcodes;
 
 use crypto::common::typenum::{UInt, UTerm};
 use hmac::{Hmac, Mac};
 use num_bigint::BigUint;
+use opcodes::AuthOpcode;
 use rc4::{
     cipher::InvalidLength,
     consts::{B0, B1},
@@ -18,6 +20,11 @@ use zerocopy::{byteorder::network_endian, Immutable, IntoBytes, KnownLayout};
 use zerocopy::{FromBytes, FromZeros, Unaligned};
 
 const SHA_DIGEST_LENGTH: usize = 20;
+
+pub mod wotlk {
+    pub const BUILD: u16 = 12340;
+    pub const VERSION: [u8; 3] = [3, 3, 5];
+}
 
 pub fn interleave<T: Copy>(a: &[T], b: &[T]) -> Result<Vec<T>, ProtocolError> {
     if a.len() != b.len() {
@@ -103,19 +110,49 @@ const _TBC_KEY_SEED: &[u8] = &[
     0x38, 0xA7, 0x83, 0x15, 0xF8, 0x92, 0x25, 0x30, 0x71, 0x98, 0x67, 0xB1, 0x8C, 0x4, 0xE2, 0xAA,
 ];
 
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
-pub struct PktHeader {
+pub struct AuthProtoPacketHeader {
     opcode: network_endian::U16,
     length: u16,
 }
 
-impl PktHeader {
+impl AuthProtoPacketHeader {
     pub fn new(opcode: u16, length: usize) -> Self {
         Self {
             opcode: (opcode as u16).into(),
             length: length as u16,
         }
+    }
+}
+
+impl std::fmt::Display for AuthProtoPacketHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AuthProtoPacketHeader {{ opcode: 0x{:X}, length: {}}}",
+            self.opcode,
+            self.packet_length()
+        )
+    }
+}
+
+#[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+pub struct ProtoPacketHeader {
+    length: network_endian::U16,
+    opcode: u16,
+}
+
+impl std::fmt::Display for ProtoPacketHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let opcode = self.opcode;
+        write!(
+            f,
+            "ProtoPacketHeader {{ opcode: 0x{:X}, length: {}}}",
+            opcode,
+            self.packet_length()
+        )
     }
 }
 
@@ -125,99 +162,43 @@ pub enum ProtocolError {
     BadWowVersion,
     BadWowBuild,
     Error(String),
+    NetworkError(String),
     Utf8Error,
     UnsupportedOsArch,
     AuthenticationError(String),
     DbError(String),
+    ZerocopyError(String),
+    UnexpectedOpcode(u16, u16),
 }
 
-pub trait ZerocopyTraits:
-    FromBytes + IntoBytes + Unaligned + KnownLayout + Immutable + 'static
-{
+pub trait PacketHeader: Sized {
+    fn packet_length(&self) -> usize;
+    fn opcode(&self) -> u16;
 }
 
-const H: usize = size_of::<PktHeader>();
-
-#[allow(async_fn_in_trait)]
-pub trait WowRawPacket: ZerocopyTraits {
-    const S: usize;
-
-    #[allow(async_fn_in_trait)]
-    async fn read_as_rawpacket<'b, R: AsyncReadExt + Unpin>(
-        read: &mut R,
-        buf: &'b mut [u8],
-    ) -> Result<(&'b Self, &'b [u8]), ProtocolError> {
-        read.read_exact(&mut buf[..Self::S])
-            .await
-            .map_err(|e| ProtocolError::Error(format!("{e:?}")))?;
-
-        Ok((
-            Self::ref_from_bytes(&buf[..Self::S])
-                .map_err(|e| ProtocolError::Error(format!("{e:?}")))?,
-            &buf[Self::S..],
-        ))
+impl PacketHeader for AuthProtoPacketHeader {
+    fn packet_length(&self) -> usize {
+        self.length as usize
+    }
+    fn opcode(&self) -> u16 {
+        self.opcode.get()
     }
 }
 
-#[allow(async_fn_in_trait)]
-pub trait WowProtoPacket: ZerocopyTraits {
-    const OPCODE: Option<u16>;
-    fn get_header(&self) -> PktHeader;
-
-    async fn read_as_wowprotopacket<'b, R: AsyncReadExt + Unpin>(
-        read: &mut R,
-        buf: &'b mut [u8],
-    ) -> Result<&'b Self, ProtocolError> {
-        read.read_exact(&mut buf[..H])
-            .await
-            .map_err(|e| ProtocolError::Error(format!("{e:?}")))?;
-
-        let header = PktHeader::read_from_bytes(&buf[..H]).unwrap();
-
-        match Self::OPCODE {
-            Some(o) => {
-                if header.opcode.get() != o as u16 {
-                    return Err(ProtocolError::Error(format!("Opcode doesn't match")));
-                }
-            }
-            _ => {}
-        }
-        read.read_exact(&mut buf[H..H + header.length as usize])
-            .await
-            .expect("failed to read data from socket");
-
-        Ok(Self::ref_from_bytes(&buf[..H + header.length as usize]).unwrap())
+impl PacketHeader for ProtoPacketHeader {
+    fn packet_length(&self) -> usize {
+        self.length.get() as usize
     }
 
-    async fn write_as_wowprotopacket<'b, W: AsyncWriteExt + Unpin>(
-        &self,
-        length: u16,
-        write: &mut W,
-        tail: Option<&[u8]>,
-    ) -> Result<(), ProtocolError> {
-        write
-            .write_all(self.get_header().as_bytes())
-            .await
-            .map_err(|e| ProtocolError::Error(format!("header write failed")))?;
-        write
-            .write_all(self.as_bytes())
-            .await
-            .map_err(|e| ProtocolError::Error(format!("packet write failed")))?;
-
-        if let Some(tail) = tail {
-            write
-                .write_all(tail)
-                .await
-                .map_err(|e| ProtocolError::Error(format!("packet write failed")))?;
-        }
-        Ok(())
+    fn opcode(&self) -> u16 {
+        self.opcode
     }
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-pub struct ProtoPacket<T: FromBytes + KnownLayout + Immutable + Unaligned + ?Sized> {
-    pub header: PktHeader,
+pub struct ProtoPacket<H: Sized + PacketHeader, T: ?Sized> {
+    pub header: H,
     pub body: T,
 }
 
@@ -238,6 +219,7 @@ pub trait SendPacket {
 }
 
 pub trait RecvPacket: 'static {
+    const H: usize;
     async fn recv<'b, R: AsyncReadExt + Unpin>(
         write: &mut R,
         buf: &'b mut [u8],
@@ -249,37 +231,104 @@ where
     T: IntoBytes + Immutable + ?Sized,
 {
     async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError> {
-        println!(
-            "sending packet of {} bytes: {:?}",
-            self.as_bytes().len(),
-            self.as_bytes()
-        );
+        // println!(
+        //     "sending packet of {} bytes: {:?}",
+        //     self.as_bytes().len(),
+        //     self.as_bytes()
+        // );
         write
             .write_all(self.as_bytes())
             .await
-            .map_err(|e| ProtocolError::Error(String::from("prkl")))
+            .map_err(|e| ProtocolError::NetworkError(format!("{e:?}")))
     }
 }
 
-impl<T> RecvPacket for ProtoPacket<T>
+impl<Header, Payload> RecvPacket for ProtoPacket<Header, Payload>
 where
-    T: FromBytes + KnownLayout + Immutable + Unaligned + ?Sized + 'static,
+    Header: FromBytes + KnownLayout + Immutable + Unaligned + Sized + PacketHeader + 'static,
+    Payload: FromBytes + KnownLayout + Immutable + Unaligned + ?Sized + 'static,
 {
+    const H: usize = size_of::<Header>();
     async fn recv<'b, R: AsyncReadExt + Unpin>(
         read: &mut R,
         buf: &'b mut [u8],
     ) -> Result<&'b Self, ProtocolError> {
-        read.read_exact(&mut buf[..H])
+        read.read_exact(&mut buf[..Self::H])
             .await
             .map_err(|e| ProtocolError::Error(String::from("read()")))?;
 
-        let body_length = PktHeader::ref_from_bytes(&buf[..H]).unwrap().length;
+        let header = Header::read_from_bytes(&buf[..Self::H])
+            .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?;
 
-        read.read_exact(&mut buf[H..H + body_length as usize])
+        println!(
+            "recv(): trying to read a packet body of {} bytes (opcode {})",
+            header.packet_length(),
+            header.opcode(),
+        );
+
+        read.read_exact(&mut buf[Self::H..Self::H + header.packet_length()])
             .await
             .map_err(|e| ProtocolError::Error(String::from("read() 2")))?;
 
-        Ok(Self::ref_from_bytes(&buf[..H + body_length as usize]).unwrap())
+        Ok(
+            Self::ref_from_bytes(&buf[..Self::H + header.packet_length()])
+                .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?,
+        )
+    }
+}
+
+impl RecvPacket for RealmListResult {
+    const H: usize = size_of::<RealmListHeader>();
+    async fn recv<'b, R: AsyncReadExt + Unpin>(
+        read: &mut R,
+        buf: &'b mut [u8],
+    ) -> Result<&'b Self, ProtocolError> {
+        read.read_exact(&mut buf[..Self::H])
+            .await
+            .map_err(|e| ProtocolError::Error(String::from("read()")))?;
+
+        let header = RealmListHeader::read_from_bytes(&buf[..Self::H])
+            .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?;
+
+        if header.cmd != AuthOpcode::REALM_LIST as u8 {
+            return Err(ProtocolError::UnexpectedOpcode(
+                header.cmd as u16,
+                AuthOpcode::REALM_LIST as u16,
+            ));
+        }
+
+        read.read_exact(&mut buf[Self::H..header.packet_size as usize])
+            .await
+            .map_err(|e| ProtocolError::Error(String::from("read()")))?;
+
+        Ok(
+            Self::ref_from_bytes(&buf[..Self::H + header.packet_size as usize])
+                .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?,
+        )
+    }
+}
+
+trait FixedSizePacket:
+    IntoBytes + FromBytes + KnownLayout + Immutable + Unaligned + Sized + 'static
+{
+}
+
+impl<T> RecvPacket for T
+where
+    T: FixedSizePacket,
+{
+    const H: usize = size_of::<Self>();
+    async fn recv<'b, R: AsyncReadExt + Unpin>(
+        read: &mut R,
+        buf: &'b mut [u8],
+    ) -> Result<&'b Self, ProtocolError> {
+        eprintln!("trying to read fixed packet of {} bytes", size_of::<Self>());
+        read.read_exact(&mut buf[..Self::H])
+            .await
+            .map_err(|e| ProtocolError::Error(String::from("read()")))?;
+
+        Ok(Self::ref_from_bytes(&buf[..size_of::<Self>()])
+            .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?)
     }
 }
 
@@ -302,8 +351,6 @@ impl std::fmt::Display for AuthChallenge {
 }
 
 pub const WOW_MAGIC: &[u8; 4] = b"WoW\0";
-pub const WOTLK_BUILD: u16 = 12340;
-pub const WOTLK_VERSION: &[u8; 3] = &[3, 3, 5];
 
 #[derive(Debug)]
 pub enum ClientOs {
@@ -323,10 +370,10 @@ impl AuthChallenge {
         if &self.header.magic != WOW_MAGIC {
             return Err(ProtocolError::BadMagic);
         }
-        if &self.header.version != WOTLK_VERSION {
+        if &self.header.version != &wotlk::VERSION {
             return Err(ProtocolError::BadWowVersion);
         }
-        if self.header.build.to_le() != WOTLK_BUILD {
+        if self.header.build.to_le() != wotlk::BUILD {
             return Err(ProtocolError::BadWowBuild);
         }
         Ok(())
@@ -352,8 +399,6 @@ impl AuthChallenge {
     }
 }
 
-impl ZerocopyTraits for AuthChallenge {}
-
 pub type Salt = [u8; 32];
 pub type Verifier = [u8; 32];
 
@@ -373,10 +418,7 @@ pub struct AuthResponse {
     pub securityFlags: u8,
 }
 
-impl ZerocopyTraits for AuthResponse {}
-impl WowRawPacket for AuthResponse {
-    const S: usize = size_of::<Self>();
-}
+impl FixedSizePacket for AuthResponse {}
 
 impl AuthResponse {
     pub fn calculate_B(_b: &BigUint, verifier: &BigUint) -> BigUint {
@@ -424,14 +466,11 @@ pub struct AuthServerProof {
     pub unkFlags: u16,
 }
 
-impl ZerocopyTraits for AuthServerProof {}
-impl WowRawPacket for AuthServerProof {
-    const S: usize = size_of::<Self>();
-}
+impl FixedSizePacket for AuthServerProof {}
 
 impl AuthServerProof {
     pub fn validate() -> Result<(), ProtocolError> {
-        Ok(())
+        todo!()
     }
 }
 
@@ -455,15 +494,7 @@ pub struct AuthClientProof {
     pub security_flags: u8,
 }
 
-impl ZerocopyTraits for AuthClientProof {}
-impl WowRawPacket for AuthClientProof {
-    const S: usize = size_of::<Self>();
-}
-
-// /*static*/ std::array<uint8, 1> const SRP6::g = { 7 };
-// /*static*/ std::array<uint8, 32> const SRP6::N = HexStrToByteArray<32>("894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7", true);
-// /*static*/ BigNumber const SRP6::_g(SRP6::g);
-// /*static*/ BigNumber const SRP6::_N(N);
+impl FixedSizePacket for AuthClientProof {}
 
 #[allow(non_upper_case_globals)]
 pub mod srp6 {
@@ -588,38 +619,103 @@ impl AuthClientProof {
     }
 }
 
+#[derive(Debug, Clone, IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
 pub struct RealmAuthChallenge {
-    pub header: PktHeader,
     pub one: u32,
     pub seed: u32,
     pub seed1: [u8; 16],
     pub seed2: [u8; 16],
 }
 
-impl ZerocopyTraits for AuthChallengeWithoutUsername {}
-impl WowRawPacket for AuthChallengeWithoutUsername {
-    const S: usize = size_of::<Self>();
-}
+impl FixedSizePacket for RealmAuthChallenge {}
 
-impl ZerocopyTraits for RealmAuthChallenge {}
-impl WowProtoPacket for RealmAuthChallenge {
-    const OPCODE: Option<u16> = Some(opcodes::Opcode::SMSG_AUTH_CHALLENGE as u16);
-
-    fn get_header(&self) -> PktHeader {
-        self.header
-    }
+#[derive(Debug, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+pub struct RealmListHeader {
+    pub cmd: u8,
+    pub packet_size: u16,
 }
 
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
 pub struct RealmListResult {
-    pub cmd: u8,
-    pub packet_size: u16,
+    pub header: RealmListHeader,
     pub _unused: u32,
     pub num_realms: u16,
     pub body: [u8],
 }
 
-// impl ZerocopyTraits for RealmListResult {}
+#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+pub struct RealmAuthSessionResponse {
+    body: [u8],
+}
+
+impl RealmAuthSessionResponse {
+    pub fn new<'b>(
+        buf: &'b mut [u8],
+        username: &str,
+        realm_id: u32,
+        challenge_seed: u32,
+        session_key: &SessionKey,
+    ) -> Result<&'b ProtoPacket<ProtoPacketHeader, Self>, ProtocolError> {
+        macro_rules! w {
+            ($cursor:expr, $data:expr) => {
+                std::io::Write::write_all(&mut $cursor, $data.as_bytes()).unwrap()
+            };
+        }
+        const L: usize = 0x3D;
+
+        let username_upper = username.to_uppercase();
+        let header = AuthProtoPacketHeader::new(
+            opcodes::Opcode::CMSG_AUTH_SESSION as u16,
+            L + username.len(),
+        );
+        let our_seed = rand::thread_rng().gen::<u32>();
+        let packet_len = {
+            let mut cursor = std::io::Cursor::new(&mut buf[..]);
+            w!(cursor, header);
+            w!(cursor, (wotlk::BUILD as u32).to_le_bytes());
+            w!(cursor, [0u8; 4]);
+            w!(cursor, username_upper);
+            w!(cursor, [0u8]); // null terminador
+            w!(cursor, [0u8; 4]);
+            w!(cursor, our_seed.to_le_bytes());
+            w!(cursor, [0u8; 8]);
+            w!(cursor, realm_id.to_le_bytes());
+            w!(cursor, [0u8; 8]);
+
+            let mut hashbuf = Vec::new();
+            hashbuf.extend(username_upper.as_bytes());
+            hashbuf.extend([0; 4]);
+            hashbuf.extend(our_seed.to_le_bytes());
+            hashbuf.extend(challenge_seed.to_le_bytes());
+            hashbuf.extend(session_key);
+            let hashbuf_sha = sha1_hash(&hashbuf);
+            w!(cursor, hashbuf_sha);
+            w!(cursor, [0u8; 4]);
+
+            cursor.position() as usize
+        };
+
+        Ok(
+            ProtoPacket::<ProtoPacketHeader, Self>::ref_from_bytes(&buf[..packet_len])
+                .map_err(|e| ProtocolError::ZerocopyError(format!("{e}")))?,
+        )
+    }
+}
+
+impl<H, T> std::fmt::Display for ProtoPacket<H, T>
+where
+    H: PacketHeader + std::fmt::Debug,
+    T: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ProtoPacket {{ header: {:?}, body: {:x?} }}",
+            self.header, &self.body
+        )
+    }
+}
