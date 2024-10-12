@@ -9,7 +9,6 @@ crypto = "0"
 crypto-bigint = "0"
 sha1 = "0"
 tokio = { version="1", features=["full"] }
-client = { path="../client" }
 rand = { version = "0.8.5", features = ["min_const_gen"] }
 zerocopy = { version = "0.8", features = ["derive"] }
 tokio-postgres = "0"
