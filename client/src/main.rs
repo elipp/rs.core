@@ -9,15 +9,13 @@ use client::{
 };
 use num_bigint::BigUint;
 use num_traits::Zero;
-use opcodes::Opcode;
+use opcodes::{Opcode, ResponseCodes};
 use rand::Rng;
 use std::io::Cursor;
 use std::mem::size_of;
 use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use zerocopy::{
-    little_endian, FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned,
-};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use rc4::{Key, Rc4, StreamCipher};
 
@@ -367,42 +365,59 @@ where
         .map_err(|e| ProtocolError::NetworkError(format!("{e:?}")))?;
     decrypt.apply_keystream(&mut buf[..1]);
 
-    let header = if (buf[0] & 0x80) > 0 {
+    let (opcode, body): (Opcode, &[u8]) = if (buf[0] & 0x80) > 0 {
         println!("have big packet");
         read.read_exact(&mut buf[1..5]).await.unwrap();
         decrypt.apply_keystream(&mut buf[1..5]);
-        PacketHeaderType::BigPacket(BigProtoPacketHeader::read_from_bytes(&buf[..5]).unwrap())
+        let header =
+            PacketHeaderType::BigPacket(BigProtoPacketHeader::read_from_bytes(&buf[..5]).unwrap());
+        read.read_exact(&mut buf[5..5 + header.packet_length()])
+            .await
+            .unwrap();
+        (
+            header.opcode().try_into()?,
+            &buf[5..5 + header.packet_length()],
+        )
     } else {
         read.read_exact(&mut buf[1..4]).await.unwrap();
         decrypt.apply_keystream(&mut buf[1..4]);
-        PacketHeaderType::Packet(ProtoPacketHeader::read_from_bytes(&buf[..5]).unwrap())
+        let header =
+            PacketHeaderType::Packet(ProtoPacketHeader::read_from_bytes(&buf[..4]).unwrap());
+        read.read_exact(&mut buf[4..4 + header.packet_length()])
+            .await
+            .unwrap();
+        (
+            header.opcode().try_into()?,
+            &buf[4..4 + header.packet_length()],
+        )
     };
-    Ok(())
-}
 
-fn decrypt_header(buf: &mut [u8], decrypt: &mut WowRc4) -> ServerPacketHeader {
-    decrypt.apply_keystream(&mut buf[..1]);
-    let header_length = if (buf[0] & 0x80) > 0 {
-        println!("have big packet");
-        5
+    if let Some(opcode_name) = OPCODE_NAME_MAP.get(&(opcode as u16)) {
+        eprintln!("Packet: {}, len: {}", opcode_name, body.len());
     } else {
-        4
-    };
-    decrypt.apply_keystream(&mut buf[1..header_length]);
-    let mut content_length = [0u8; size_of::<u32>()];
-    let mut opcode = [0u8; size_of::<u16>()];
-    if header_length == 5 {
-        content_length[1..].copy_from_slice(&[buf[0] & 0x7f, buf[1], buf[2]]);
-        opcode.copy_from_slice(&buf[3..5]);
-    } else {
-        content_length[2..].copy_from_slice(&buf[..2]);
-        opcode.copy_from_slice(&buf[2..4]);
+        eprintln!("Unnamed opcode {:x}?!", opcode as u16);
     }
-    ServerPacketHeader {
-        opcode: u16::from_le_bytes(opcode),
-        header_length,
-        content_length: u32::from_be_bytes(content_length) as usize,
+
+    match opcode {
+        Opcode::SMSG_AUTH_RESPONSE => match body {
+            [b] => match (*b).try_into()? {
+                ResponseCodes::AUTH_REJECT | ResponseCodes::AUTH_FAILED => {
+                    return Err(ProtocolError::AuthenticationError(format!(
+                        "Authserver auth was ok, but worldserver rejected"
+                    )))
+                }
+                ResponseCodes::AUTH_OK => eprintln!("Realm auth success!"),
+                b => todo!("{b:?}"),
+            },
+            _ => {
+                todo!()
+            }
+        },
+        Opcode::CMSG_WARDEN_DATA => eprintln!("CMSG_WARDEN_DATA"),
+        _ => todo!(),
     }
+
+    Ok(())
 }
 
 impl From<ProtocolError> for WowCliError {
@@ -467,14 +482,7 @@ async fn main() -> WowCliResult<()> {
 
         let (mut encrypt, mut decrypt) = init_crypto(&session_key)?;
         loop {
-            let bytes = stream.read_exact(&mut buf[..1]).await?;
-
-            let mut processed: usize = 0;
-            while processed < bytes {
-                let packet_header = decrypt_header(&mut buf[processed..], &mut decrypt);
-                println!("{packet_header} (read {}/{} bytes)", processed, bytes);
-                processed += packet_header.content_length + packet_header.header_length - 2;
-            }
+            let packet = read_one_encrypted(&mut stream, &mut buf, &mut decrypt).await?;
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }

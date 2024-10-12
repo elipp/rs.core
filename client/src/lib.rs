@@ -1,5 +1,4 @@
 use core::str;
-use std::fmt::LowerHex;
 
 mod opcodes;
 
@@ -15,9 +14,9 @@ use sha1::{Digest, Sha1};
 
 use rand::Rng;
 use srp6::N_BYTES_LE;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use zerocopy::{byteorder::network_endian, little_endian, Immutable, IntoBytes, KnownLayout};
-use zerocopy::{FromBytes, FromZeros, Unaligned};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use zerocopy::{byteorder::network_endian, Immutable, IntoBytes, KnownLayout};
+use zerocopy::{FromBytes, Unaligned};
 
 const SHA_DIGEST_LENGTH: usize = 20;
 
@@ -212,6 +211,12 @@ impl PacketHeaderType {
             PacketHeaderType::BigPacket(p) => p.packet_length(),
         }
     }
+    pub fn opcode(&self) -> u16 {
+        match self {
+            PacketHeaderType::Packet(p) => p.opcode(),
+            PacketHeaderType::BigPacket(p) => p.opcode(),
+        }
+    }
 }
 
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -268,6 +273,7 @@ pub enum ProtocolError {
     DbError(String),
     ZerocopyError(String),
     UnexpectedOpcode(u16, u16),
+    InvalidEnumValue(String),
 }
 
 pub trait PacketHeader: Sized {
@@ -439,7 +445,7 @@ where
         read: &mut R,
         buf: &'b mut [u8],
     ) -> Result<&'b Self, ProtocolError> {
-        eprintln!("trying to read fixed packet of {} bytes", size_of::<Self>());
+        // eprintln!("trying to read fixed packet of {} bytes", size_of::<Self>());
         read.read_exact(&mut buf[..Self::H])
             .await
             .map_err(|e| ProtocolError::Error(String::from("read()")))?;
@@ -781,7 +787,7 @@ pub struct RealmListResult {
 #[derive(IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
 #[repr(C, packed)]
 pub struct WotlkAuthResponseHeaderFirst {
-    build: little_endian::U16,
+    build: u32,
     login_server_id: u32,
 }
 
@@ -794,6 +800,8 @@ pub struct WotlkAuthResponseHeaderSecond {
     battlegroup_id: u32,
     realm_id: u32,
     dos_response: u64,
+    digest: Sha1Digest,
+    addon_info_length: u32,
 }
 
 #[derive(IntoBytes, FromBytes, Unaligned, KnownLayout, Immutable)]
@@ -826,19 +834,10 @@ impl WotlkAuthResponse {
                 login_server_id: 0,
             };
 
-            let second = WotlkAuthResponseHeaderSecond {
-                login_server_type: 0,
-                local_challenge: [0; 4],
-                region_id: 0,
-                battlegroup_id: 0,
-                realm_id,
-                dos_response: 0,
-            };
             write_bytes!(cursor, header);
             write_bytes!(cursor, first);
             write_bytes!(cursor, username_upper);
             write_bytes!(cursor, 0u8); // null terminador
-            write_bytes!(cursor, second);
 
             let mut hashbuf = Vec::new();
             hashbuf.extend(username_upper.as_bytes());
@@ -846,12 +845,19 @@ impl WotlkAuthResponse {
             hashbuf.extend(our_seed.to_le_bytes());
             hashbuf.extend(challenge_seed.to_le_bytes());
             hashbuf.extend(session_key);
-            let hashbuf_sha = sha1_hash(&hashbuf);
-            write_bytes!(cursor, hashbuf_sha);
 
-            let addon_info_length = 0;
-            write_bytes!(cursor, addon_info_length);
+            let second = WotlkAuthResponseHeaderSecond {
+                login_server_type: 0,
+                local_challenge: [0; 4],
+                region_id: 0,
+                battlegroup_id: 0,
+                realm_id,
+                dos_response: 0,
+                digest: sha1_hash(&hashbuf),
+                addon_info_length: 0,
+            };
 
+            write_bytes!(cursor, second);
             cursor.position() as usize
         };
 
