@@ -5,6 +5,9 @@ edition = "2021"
 default-run = "authserver"
 
 [dependencies]
+crypto = "0"
+crypto-bigint = "0"
+sha1 = "0"
 tokio = { version="1", features=["full"] }
 client = { path="../client" }
 rand = { version = "0.8.5", features = ["min_const_gen"] }
@@ -14,7 +17,7 @@ deadpool-postgres = "0"
 num-bigint = "0"
 clap = { version = "4", features = ["derive"] }
 num-traits = "0"
-tracing = "0.1.40"
+tracing = "0"
 
 [[bin]]
 path = "src/utils/add_account.rs"

@@ -83,10 +83,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "client",
+ "crypto",
+ "crypto-bigint",
  "deadpool-postgres",
  "num-bigint",
  "num-traits",
  "rand",
+ "sha1",
  "tokio",
  "tokio-postgres",
  "tracing",

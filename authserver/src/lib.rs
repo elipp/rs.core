@@ -1,9 +1,9 @@
+use client::opcodes::AuthResult;
 use client::{
-    generate_random_bytes, srp6, to_zero_padded_array_le, AuthChallenge, AuthResponse,
-    ProtocolError, Salt, Verifier,
+    generate_random_bytes, srp6, to_zero_padded_array_le, AuthResponse, ProtocolError, Salt,
+    Verifier,
 };
 use num_bigint::BigUint;
-use num_traits::Num;
 
 pub mod auth;
 
@@ -51,7 +51,7 @@ pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> (AuthResponse, Big
         AuthResponse {
             opcode: 0x0,
             u1: 0x0,
-            u2: crate::auth::AuthResult::Success as u8,
+            u2: AuthResult::Success as u8,
             B: B_bytes,
             u3: 0x1,
             g: [srp6::_g],

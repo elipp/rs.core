@@ -1,6 +1,4 @@
-use auth::AuthResult;
 use authserver::{new_auth_response, Account};
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 use tokio_postgres::NoTls;
@@ -9,12 +7,11 @@ use deadpool_postgres::{GenericClient, ManagerConfig, RecyclingMethod, Runtime};
 
 use client::{
     commands, generate_random_bytes, AuthChallenge, AuthClientProof, AuthProtoPacketHeader,
-    AuthServerProof, ProtoPacket, ProtocolError, RecvPacket,
+    AuthServerProof, ProtoPacket, ProtocolError, RecvPacket, SendPacket,
 };
 use core::str;
 use std::env;
 use std::error::Error;
-use zerocopy::IntoBytes;
 
 pub mod auth;
 
@@ -103,30 +100,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         challenge.body.get_client_os_platform()?
                     );
 
-                    let (response, _b) = new_auth_response(&account.salt, &account.verifier);
-                    socket
-                        .write_all(response.as_bytes())
-                        .await
-                        .expect("write authresponse failed");
+                    let (auth_response, _b) = new_auth_response(&account.salt, &account.verifier);
+                    auth_response.send(&mut socket).await?;
 
                     let proof = AuthClientProof::recv(&mut socket, &mut buf).await?;
                     tracing::info!("got client proof {proof:?}");
-                    proof.verify(&account.salt, &account.verifier, &username, _b)?;
+                    let session_key =
+                        proof.verify(&account.salt, &account.verifier, &username, _b)?;
 
-                    let server_proof = AuthServerProof {
-                        cmd: commands::AUTH_LOGON_PROOF,
-                        error: AuthResult::Success as u8,
-                        M2: generate_random_bytes(), // TODO: calculate this shit properly
-                        accountFlags: 0x0,
-                        surveyId: 0x0,
-                        unkFlags: 0x0,
-                    };
-                    socket
-                        .write_all(server_proof.as_bytes())
-                        .await
-                        .map_err(|e| {
-                            ProtocolError::Error(format!("writing AuthServerProof failed: {e:?}"))
-                        })?;
+                    let server_proof =
+                        AuthServerProof::new_ok_with_verifier(&proof.A, &proof.M1, &session_key);
+                    server_proof.send(&mut socket).await?;
                 } else {
                     tracing::warn!("couldn't find user {username} from db");
                     todo!("write unknown account packet to socket and exit")

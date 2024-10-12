@@ -1,10 +1,10 @@
 use client::{
     commands::{self, CMD_REALM_LIST},
-    interleave, partition, sha1_hash, sha1_hash_iter, sha1_hmac, to_zero_padded_array_le, wotlk,
-    AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof, AuthProtoPacketHeader,
-    AuthResponse, AuthServerProof, BigProtoPacketHeader, PacketHeader, PacketHeaderType,
-    ProtoPacket, ProtoPacketHeader, ProtocolError, RealmAuthChallenge, RealmListResult, RecvPacket,
-    SendPacket, SessionKey, WotlkAuthResponse, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY,
+    interleave, partition, sha1_digest, sha1_hmac, to_zero_padded_array_le, wotlk, AuthChallenge,
+    AuthChallengeWithoutUsername, AuthClientProof, AuthProtoPacketHeader, AuthResponse,
+    AuthServerProof, BigProtoPacketHeader, PacketHeader, PacketHeaderType, ProtoPacket,
+    ProtoPacketHeader, ProtocolError, RealmAuthChallenge, RealmListResult, RecvPacket, SendPacket,
+    SessionKey, Sha1Digest, WotlkAuthResponse, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY,
     WOW_MAGIC,
 };
 use num_bigint::BigUint;
@@ -125,9 +125,10 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     let k = BigUint::from(3u32);
 
     let user_upper = USERNAME.to_uppercase();
-    let xb = sha1_hash_iter(auth.salt.into_iter().chain(sha1_hash(
-        format!("{}:{}", user_upper, PASSWORD.to_uppercase()).into_bytes(),
-    )));
+    let xb = sha1_digest!(
+        auth.salt,
+        sha1_digest!(format!("{}:{}", user_upper, PASSWORD.to_uppercase()))
+    );
     let x = BigUint::from_bytes_le(&xb);
     let one = BigUint::from(1u32);
 
@@ -148,32 +149,29 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     let A_bytes = to_zero_padded_array_le::<32>(&A.to_bytes_le());
     let B_bytes = to_zero_padded_array_le::<32>(&B.to_bytes_le());
 
-    let u = BigUint::from_bytes_le(&sha1_hash_iter(
-        A_bytes.iter().chain(B_bytes.iter()).copied(),
-    ));
+    let u = BigUint::from_bytes_le(&sha1_digest!(A_bytes, B_bytes));
 
     let S = (&B + (k * (&N - g.modpow(&x, &N))) % &N).modpow(&(&a + (&u * &x)), &N);
     let s_bytes = to_zero_padded_array_le::<32>(&S.to_bytes_le());
     let (s_even, s_odd) = partition(&s_bytes);
-    let session_key = interleave(&sha1_hash(s_even), &sha1_hash(s_odd))?;
-    let Nhash = sha1_hash(auth.N);
-    let ghash = sha1_hash(auth.g);
+    let session_key = interleave(&sha1_digest!(s_even), &sha1_digest!(s_odd))?;
+    let Nhash = sha1_digest!(auth.N);
+    let ghash = sha1_digest!(auth.g);
 
     let gNhash: Vec<u8> = ghash.into_iter().zip(Nhash).map(|(g, n)| g ^ n).collect();
-
-    let mut m1 = Vec::new();
-    m1.extend(gNhash);
-    m1.extend(sha1_hash(user_upper));
-    m1.extend(auth.salt);
-    m1.extend(&A_bytes);
-    m1.extend(&B_bytes);
-    m1.extend(&session_key);
 
     Ok((
         AuthClientProof {
             cmd: commands::AUTH_LOGON_PROOF,
             A: A_bytes,
-            M1: sha1_hash(m1),
+            M1: sha1_digest!(
+                gNhash,
+                sha1_digest!(user_upper),
+                auth.salt,
+                A_bytes,
+                B_bytes,
+                session_key
+            ),
             crc: [0; 20],
             nkeys: 0,
             security_flags: 0,
@@ -400,21 +398,23 @@ where
 
     match opcode {
         Opcode::SMSG_AUTH_RESPONSE => match body {
-            [b] => match (*b).try_into()? {
+            [first, rest @ ..] => match (*first).try_into()? {
+                ResponseCodes::AUTH_OK => {
+                    println!("Realm auth ok! ({rest:?})");
+                }
                 ResponseCodes::AUTH_REJECT | ResponseCodes::AUTH_FAILED => {
                     return Err(ProtocolError::AuthenticationError(format!(
                         "Authserver auth was ok, but worldserver rejected"
                     )))
                 }
-                ResponseCodes::AUTH_OK => eprintln!("Realm auth success!"),
-                b => todo!("{b:?}"),
+                b => todo!("{opcode:?} {b:?}"),
             },
-            _ => {
-                todo!()
+            r => {
+                eprintln!("server responded with {r:x?}");
             }
         },
-        Opcode::CMSG_WARDEN_DATA => eprintln!("CMSG_WARDEN_DATA"),
-        _ => todo!(),
+        Opcode::SMSG_WARDEN_DATA => eprintln!("SMSG_WARDEN_DATA"),
+        o => todo!("{o:?}"),
     }
 
     Ok(())

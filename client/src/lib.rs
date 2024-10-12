@@ -1,11 +1,11 @@
 use core::str;
 
-mod opcodes;
+pub mod opcodes;
 
 use crypto::common::typenum::{UInt, UTerm};
 use hmac::{Hmac, Mac};
 use num_bigint::BigUint;
-use opcodes::AuthOpcode;
+use opcodes::{AuthOpcode, AuthResult};
 use rc4::{
     cipher::InvalidLength,
     consts::{B0, B1},
@@ -64,15 +64,6 @@ pub fn to_zero_padded_array_le<const N: usize>(vec: &[u8]) -> [u8; N] {
     array
 }
 
-pub fn sha1_hash<D: AsRef<[u8]>>(data: D) -> Sha1Digest {
-    let mut sha1 = Sha1::new();
-    sha1.update(data);
-    let hash = sha1.finalize();
-    hash.as_slice()
-        .try_into()
-        .expect("sha1 digest length to be 20")
-}
-
 pub fn sha1_hmac(key: &[u8], data: &[u8]) -> Result<Sha1Digest, InvalidLength> {
     let mut hmac = Hmac::<Sha1>::new_from_slice(key)?;
     hmac.update(data);
@@ -84,13 +75,17 @@ pub fn sha1_hmac(key: &[u8], data: &[u8]) -> Result<Sha1Digest, InvalidLength> {
         .expect("sha1 hmac digest length to be 20"))
 }
 
-pub fn sha1_hash_iter<D: Iterator<Item = u8>>(data: D) -> Sha1Digest {
-    let mut sha1 = Sha1::new();
-    sha1.update(data.collect::<Vec<_>>());
-    sha1.finalize()
-        .as_slice()
-        .try_into()
-        .expect("sha1 digest length to be 20")
+#[macro_export]
+macro_rules! sha1_digest {
+    ( $( $arg:expr ),* ) => {{
+        use sha1::{Digest, Sha1};
+        let mut sha1 = Sha1::new();
+        $(
+            sha1.update($arg.as_bytes());
+        )*
+        let res: Sha1Digest = sha1.finalize().as_slice().try_into().expect("sha1 digest length to be 20");
+        res
+    }};
 }
 
 // DAYUUM xD
@@ -589,6 +584,20 @@ pub struct AuthServerProof {
     pub unkFlags: u16,
 }
 
+impl AuthServerProof {
+    pub fn new_ok_with_verifier(A: &[u8; 32], M1: &Sha1Digest, session_key: &SessionKey) -> Self {
+        let M2 = sha1_digest!(A, M1, session_key);
+        Self {
+            cmd: commands::AUTH_LOGON_PROOF,
+            error: AuthResult::Success as u8,
+            M2: todo!(),
+            accountFlags: todo!(),
+            surveyId: todo!(),
+            unkFlags: todo!(),
+        }
+    }
+}
+
 impl FixedSizePacket for AuthServerProof {}
 
 impl AuthServerProof {
@@ -682,23 +691,20 @@ impl AuthClientProof {
 
         let B = AuthResponse::calculate_B(&_b, &v);
 
-        let ABhash = sha1_hash_iter(
-            A.to_bytes_le()
-                .into_iter()
-                .chain(B.to_bytes_le().into_iter()),
-        );
+        let ABhash = sha1_digest!(A.to_bytes_le(), B.to_bytes_le());
 
         let u = BigUint::from_bytes_le(&ABhash);
         let S = (&A * (v.modpow(&u, &N))).modpow(&_b, &N);
 
         let S_bytes = to_zero_padded_array_le::<32>(&S.to_bytes_le());
         let (s_even, s_odd) = partition(&S_bytes);
-        let session_key: SessionKey =
-            to_zero_padded_array_le(&interleave(&sha1_hash(s_even), &sha1_hash(s_odd)).unwrap());
+        let session_key: SessionKey = to_zero_padded_array_le(
+            &interleave(&sha1_digest!(s_even), &sha1_digest!(s_odd)).unwrap(),
+        );
 
         let g_bytes = g.to_bytes_le();
-        let NHash = sha1_hash(*N_BYTES_LE);
-        let gHash = sha1_hash(g_bytes);
+        let NHash = sha1_digest!(*N_BYTES_LE);
+        let gHash = sha1_digest!(g_bytes);
 
         let NgHash: Vec<u8> = NHash
             .clone()
@@ -707,7 +713,7 @@ impl AuthClientProof {
             .map(|(_n, _g)| _n ^ _g)
             .collect();
 
-        let _I = sha1_hash(username_upper.as_bytes());
+        let _I = sha1_digest!(username_upper.as_bytes());
         let salt_bytes = s.to_bytes_le();
 
         eprintln!("A: {}", Ah(&A));
@@ -718,15 +724,13 @@ impl AuthClientProof {
         eprintln!("S: {}", Ah(&S));
         eprintln!("K: {}", Aha(&session_key));
 
-        let our_M = sha1_hash_iter(
-            (NgHash
-                .iter()
-                .chain(_I.iter())
-                .chain(salt_bytes.iter())
-                .chain(A.to_bytes_le().iter())
-                .chain(B.to_bytes_le().iter())
-                .chain(session_key.iter()))
-            .copied(),
+        let our_M = sha1_digest!(
+            NgHash,
+            _I,
+            salt_bytes,
+            A.to_bytes_le(),
+            B.to_bytes_le(),
+            session_key
         );
 
         eprintln!("our_M: {}", Aha(&our_M));
@@ -839,13 +843,6 @@ impl WotlkAuthResponse {
             write_bytes!(cursor, username_upper);
             write_bytes!(cursor, 0u8); // null terminador
 
-            let mut hashbuf = Vec::new();
-            hashbuf.extend(username_upper.as_bytes());
-            hashbuf.extend([0; 4]);
-            hashbuf.extend(our_seed.to_le_bytes());
-            hashbuf.extend(challenge_seed.to_le_bytes());
-            hashbuf.extend(session_key);
-
             let second = WotlkAuthResponseHeaderSecond {
                 login_server_type: 0,
                 local_challenge: our_seed.to_le_bytes(),
@@ -853,7 +850,13 @@ impl WotlkAuthResponse {
                 battlegroup_id: 0,
                 realm_id,
                 dos_response: 0,
-                digest: sha1_hash(&hashbuf),
+                digest: sha1_digest!(
+                    username_upper,
+                    [0u8; 4],
+                    our_seed.to_le_bytes(),
+                    challenge_seed.to_le_bytes(),
+                    session_key
+                ),
                 addon_info_length: 0,
             };
 

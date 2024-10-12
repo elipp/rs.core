@@ -1,74 +1,12 @@
-use client::{sha1_hash, sha1_hash_iter, to_zero_padded_array_le, ProtocolError, Salt, Verifier};
+use client::{sha1_digest, to_zero_padded_array_le, ProtocolError, Salt, Sha1Digest, Verifier};
 use num_bigint::BigUint;
-
-#[allow(dead_code)]
-#[repr(u8)]
-pub enum AuthResult {
-    Success = 0x00,
-    FailBanned = 0x03,
-    FailUnknownAccount = 0x04,
-    FailIncorrectPassword = 0x05,
-    FailAlreadyOnline = 0x06,
-    FailNoTime = 0x07,
-    FailDbBusy = 0x08,
-    FailVersionInvalid = 0x09,
-    FailVersionUpdate = 0x0A,
-    FailInvalidServer = 0x0B,
-    FailSuspended = 0x0C,
-    FailNoAccess = 0x0D,
-    SuccessSurvey = 0x0E,
-    FailParentControl = 0x0F,
-    FailLockedEnforced = 0x10,
-    FailTrialEnded = 0x11,
-    FailUseBattlenet = 0x12,
-    FailAntiIndulgence = 0x13,
-    FailExpired = 0x14,
-    FailNoGameAccount = 0x15,
-    FailChargeback = 0x16,
-    FailInternetGameRoomWithoutBnet = 0x17,
-    FailGameAccountLocked = 0x18,
-    FailUnlockableLock = 0x19,
-    FailConversionRequired = 0x20,
-    FailDisconnected = 0xFF,
-}
-
-#[allow(dead_code)]
-#[repr(u8)]
-pub enum LoginResult {
-    Ok = 0x00,
-    Failed = 0x01,
-    Failed2 = 0x02,
-    Banned = 0x03,
-    UnknownAccount = 0x04,
-    UnknownAccount3 = 0x05,
-    AlreadyOnline = 0x06,
-    NoTime = 0x07,
-    DbBusy = 0x08,
-    BadVersion = 0x09,
-    DownloadFile = 0x0A,
-    Failed3 = 0x0B,
-    Suspended = 0x0C,
-    Failed4 = 0x0D,
-    Connected = 0x0E,
-    ParentalControl = 0x0F,
-    LockedEnforced = 0x10,
-}
-
-#[allow(dead_code)]
-#[repr(u8)]
-pub enum ExpansionFlags {
-    PostBcExpFlag = 0x2,
-    PreBcExpFlag = 0x1,
-    NoValidExpFlag = 0x0,
-}
+use zerocopy::IntoBytes;
 
 pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> Verifier {
     use client::srp6::{g, N};
     let creds = format!("{}:{}", username_upper, password.to_ascii_uppercase());
 
-    let xb = BigUint::from_bytes_le(&sha1_hash_iter(
-        salt.iter().copied().chain(sha1_hash(creds)),
-    ));
+    let xb = BigUint::from_bytes_le(&sha1_digest!(salt, sha1_digest!(creds)));
     let v = g.modpow(&xb, &N);
     to_zero_padded_array_le(&v.to_bytes_be()) // TODO le/be confusion
 }
@@ -76,13 +14,15 @@ pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> 
 #[allow(unused_imports, dead_code)]
 mod test {
     use client::{
-        interleave, partition, sha1_hash, sha1_hash_iter,
+        interleave, partition, sha1_digest,
         srp6::{self, N_BYTES_LE},
-        to_zero_padded_array_le, Ah, AuthResponse, Salt, SessionKey,
+        to_zero_padded_array_le, Ah, AuthResponse, Salt, SessionKey, Sha1Digest,
     };
     use num_bigint::BigUint;
     use num_traits::Num;
     use srp6::{g, N};
+
+    use zerocopy::IntoBytes;
 
     use crate::auth::calculate_verifier;
 
@@ -123,11 +63,7 @@ mod test {
 
         assert_ne!(&A % &*N, BigUint::ZERO);
 
-        let ABhash = sha1_hash_iter(
-            A.to_bytes_le()
-                .into_iter()
-                .chain(B.to_bytes_le().into_iter()),
-        );
+        let ABhash = sha1_digest!(A.to_bytes_le(), B.to_bytes_le());
 
         assert_eq!(&ah_le(&ABhash), "a33209b9872e5fce13a7eb5f0f4b180ba6f4d707");
 
@@ -167,8 +103,9 @@ mod test {
 
         let S_bytes = to_zero_padded_array_le::<32>(&S.to_bytes_le());
         let (s_even, s_odd) = partition(&S_bytes);
-        let session_key: SessionKey =
-            to_zero_padded_array_le(&interleave(&sha1_hash(s_even), &sha1_hash(s_odd)).unwrap());
+        let session_key: SessionKey = to_zero_padded_array_le(
+            &interleave(&sha1_digest!(s_even), &sha1_digest!(s_odd)).unwrap(),
+        );
 
         assert_eq!(
             &S.to_str_radix(16),
@@ -181,8 +118,8 @@ mod test {
         );
 
         let g_bytes = g.to_bytes_le();
-        let NHash = sha1_hash(*N_BYTES_LE);
-        let gHash = sha1_hash(g_bytes);
+        let NHash = sha1_digest!(*N_BYTES_LE);
+        let gHash = sha1_digest!(&g_bytes);
 
         let NgHash: Vec<u8> = NHash
             .clone()
@@ -195,20 +132,18 @@ mod test {
         assert_eq!(&ah_le(&gHash), "b4a75264e15ea8347e5bbe9688eea1dde9e71b5d");
         assert_eq!(&ah_le(&NgHash), "a7c27b6c96ca6f505a7c98031173ac383ab07bdd");
 
-        let _I = sha1_hash("TLIPP".as_bytes());
+        let _I = sha1_digest!("TLIPP");
         assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
 
         let salt_bytes = s.to_bytes_le();
 
-        let our_M = sha1_hash_iter(
-            (NgHash
-                .iter()
-                .chain(_I.iter())
-                .chain(salt_bytes.iter())
-                .chain(A.to_bytes_le().iter())
-                .chain(B.to_bytes_le().iter())
-                .chain(session_key.iter()))
-            .copied(),
+        let our_M = sha1_digest!(
+            NgHash,
+            _I,
+            salt_bytes,
+            A.to_bytes_le(),
+            B.to_bytes_le(),
+            session_key
         );
 
         assert_eq!(&ah_le(&our_M), "d1620cf47d49e65e46433dc3069231ea9c84f2d9");
@@ -253,7 +188,7 @@ mod test {
 
         let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
 
-        let _I = sha1_hash("TLIPP".as_bytes());
+        let _I = sha1_digest!("TLIPP");
         assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
         let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
         assert_eq!(
@@ -275,7 +210,7 @@ mod test {
 
         let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
 
-        let _I = sha1_hash("TLIPP".as_bytes());
+        let _I = sha1_digest!("TLIPP");
         assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
         let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
         assert_eq!(
@@ -314,7 +249,7 @@ mod test {
 
         let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
 
-        let _I = sha1_hash("TLIPP".as_bytes());
+        let _I = sha1_digest!("TLIPP");
         assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
         let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
 
@@ -342,7 +277,7 @@ mod test {
 
         let salt_bytes = to_zero_padded_array_le::<32>(&salt.to_bytes_le());
 
-        let _I = sha1_hash("TLIPP".as_bytes());
+        let _I = sha1_digest!("TLIPP");
         assert_eq!(&ah_le(&_I), "95ed43716c7efc75442d9bb2b7e8dd9b5c85ef3a");
         let v = calculate_verifier("TLIPP", "kuusysi69", &salt_bytes);
 
