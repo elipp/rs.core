@@ -848,7 +848,7 @@ impl WotlkAuthResponse {
 
             let second = WotlkAuthResponseHeaderSecond {
                 login_server_type: 0,
-                local_challenge: [0; 4],
+                local_challenge: our_seed.to_le_bytes(),
                 region_id: 0,
                 battlegroup_id: 0,
                 realm_id,
@@ -856,6 +856,8 @@ impl WotlkAuthResponse {
                 digest: sha1_hash(&hashbuf),
                 addon_info_length: 0,
             };
+
+            eprintln!("{:x?}", second.digest);
 
             write_bytes!(cursor, second);
             cursor.position() as usize
