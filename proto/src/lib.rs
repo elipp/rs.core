@@ -1,7 +1,5 @@
 use core::str;
 
-pub mod opcodes;
-
 use crypto::common::typenum::{UInt, UTerm};
 use hmac::{Hmac, Mac};
 use num_bigint::BigUint;
@@ -15,53 +13,78 @@ use sha1::{Digest, Sha1};
 use rand::Rng;
 use srp6::N_BYTES_LE;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use utils::{interleave, partition, reverse_from_u32, to_zero_padded_array_le, transform_to_u32};
 use zerocopy::{byteorder::network_endian, Immutable, IntoBytes, KnownLayout};
 use zerocopy::{FromBytes, Unaligned};
+
+pub mod opcodes;
 
 const SHA_DIGEST_LENGTH: usize = 20;
 
 pub type Sha1Digest = [u8; SHA_DIGEST_LENGTH];
+
+pub type U24 = [u8; 3];
 
 pub mod wotlk {
     pub const BUILD: u16 = 12340;
     pub const VERSION: [u8; 3] = [3, 3, 5];
 }
 
-pub fn interleave<T: Copy>(a: &[T], b: &[T]) -> Result<Vec<T>, ProtocolError> {
-    if a.len() != b.len() {
-        return Err(ProtocolError::Error(
-            "interleave: a.len() != b.len()".to_owned(),
-        ));
+pub mod utils {
+    use crate::{ProtocolError, U24};
+
+    pub fn interleave<T: Copy>(a: &[T], b: &[T]) -> Result<Vec<T>, ProtocolError> {
+        if a.len() != b.len() {
+            return Err(ProtocolError::Error(
+                "interleave: a.len() != b.len()".to_owned(),
+            ));
+        }
+        let mut res = Vec::with_capacity(a.len() * 2);
+        for i in 0..a.len() {
+            res.push(a[i]);
+            res.push(b[i]);
+        }
+        Ok(res)
     }
-    let mut res = Vec::with_capacity(a.len() * 2);
-    for i in 0..a.len() {
-        res.push(a[i]);
-        res.push(b[i]);
+
+    pub fn partition<T: Copy>(s: &[T]) -> (Vec<T>, Vec<T>) {
+        assert_eq!(s.len() % 2, 0);
+        let half_len = s.len() / 2;
+        let mut a = Vec::with_capacity(half_len);
+        let mut b = Vec::with_capacity(half_len);
+        for i in 0..half_len {
+            a.push(s[2 * i]);
+            b.push(s[2 * i + 1]);
+        }
+        (a, b)
     }
-    Ok(res)
-}
 
-pub fn partition<T: Copy>(s: &[T]) -> (Vec<T>, Vec<T>) {
-    assert_eq!(s.len() % 2, 0);
-    let half_len = s.len() / 2;
-    let mut a = Vec::with_capacity(half_len);
-    let mut b = Vec::with_capacity(half_len);
-    for i in 0..half_len {
-        a.push(s[2 * i]);
-        b.push(s[2 * i + 1]);
+    pub fn to_zero_padded_array_le<const N: usize>(vec: &[u8]) -> [u8; N] {
+        assert!(vec.len() <= N);
+
+        let mut array = [0u8; N];
+        let offset = N.saturating_sub(vec.len());
+
+        (&mut array[offset..]).copy_from_slice(&vec);
+
+        array
     }
-    (a, b)
-}
 
-pub fn to_zero_padded_array_le<const N: usize>(vec: &[u8]) -> [u8; N] {
-    assert!(vec.len() <= N);
+    pub fn transform_to_u32(u: &U24) -> u32 {
+        let b0 = u[0] as u32;
+        let b1 = u[1] as u32;
+        let b2 = (u[2] & 0x7F) as u32;
 
-    let mut array = [0u8; N];
-    let offset = N.saturating_sub(vec.len());
+        (b2 << 16) | (b1 << 8) | b0
+    }
 
-    (&mut array[offset..]).copy_from_slice(&vec);
+    pub fn reverse_from_u32(u: u32) -> U24 {
+        let b0 = (u & 0xFF) as u8;
+        let b1 = ((u >> 8) & 0xFF) as u8;
+        let b2 = ((u >> 16) & 0x7F) as u8 | 0x80;
 
-    array
+        [b0, b1, b2]
+    }
 }
 
 pub fn sha1_hmac(key: &[u8], data: &[u8]) -> Result<Sha1Digest, InvalidLength> {
@@ -148,29 +171,11 @@ pub struct ProtoPacketHeader {
     opcode: u16,
 }
 
-pub type U24 = [u8; 3];
-
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
 pub struct BigProtoPacketHeader {
     length: U24,
     opcode: u16,
-}
-
-fn transform_to_u32(u: &U24) -> u32 {
-    let b0 = u[0] as u32;
-    let b1 = u[1] as u32;
-    let b2 = (u[2] & 0x7F) as u32;
-
-    (b2 << 16) | (b1 << 8) | b0
-}
-
-fn reverse_from_u32(u: u32) -> U24 {
-    let b0 = (u & 0xFF) as u8;
-    let b1 = ((u >> 8) & 0xFF) as u8;
-    let b2 = ((u >> 16) & 0x7F) as u8 | 0x80;
-
-    [b0, b1, b2]
 }
 
 impl PacketHeader for BigProtoPacketHeader {
@@ -339,15 +344,18 @@ pub struct AuthChallengeWithoutUsername {
 }
 
 pub trait SendPacket {
-    async fn send<W: AsyncWriteExt + Unpin>(&self, write: &mut W) -> Result<(), ProtocolError>;
+    fn send<W: AsyncWriteExt + Unpin>(
+        &self,
+        write: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), ProtocolError>>;
 }
 
 pub trait RecvPacket: 'static {
     const H: usize;
-    async fn recv<'b, R: AsyncReadExt + Unpin>(
+    fn recv<'b, R: AsyncReadExt + Unpin>(
         write: &mut R,
         buf: &'b mut [u8],
-    ) -> Result<&'b Self, ProtocolError>;
+    ) -> impl std::future::Future<Output = Result<&'b Self, ProtocolError>>;
 }
 
 impl<T> SendPacket for T
@@ -526,20 +534,20 @@ pub struct AuthResponse {
     pub opcode: u8,
     pub u1: u8,
     pub u2: u8,
-    pub B: [u8; 32],
+    pub b: [u8; 32],
     pub u3: u8,
     pub g: [u8; 1],
     pub u4: u8,
-    pub N: [u8; 32],
+    pub n: [u8; 32],
     pub salt: Salt,
     pub unk1: [u8; 16], // some versionchallenge apparently?
-    pub securityFlags: u8,
+    pub security_flags: u8,
 }
 
 impl FixedSizePacket for AuthResponse {}
 
 impl AuthResponse {
-    pub fn calculate_B(_b: &BigUint, verifier: &BigUint) -> BigUint {
+    pub fn calculate_b(_b: &BigUint, verifier: &BigUint) -> BigUint {
         use srp6::{g, N};
         let three = BigUint::from(3u32);
         println!("g: {}", Ah(&g));
@@ -578,22 +586,21 @@ pub fn generate_random_bytes_vec<const N: usize>() -> Vec<u8> {
 pub struct AuthServerProof {
     pub cmd: u8,
     pub error: u8,
-    pub M2: [u8; 20],
-    pub accountFlags: u32,
-    pub surveyId: u32,
-    pub unkFlags: u16,
+    pub m2: [u8; 20],
+    pub account_flags: u32,
+    pub survey_id: u32,
+    pub unk_flags: u16,
 }
 
 impl AuthServerProof {
-    pub fn new_ok_with_verifier(A: &[u8; 32], M1: &Sha1Digest, session_key: &SessionKey) -> Self {
-        let M2 = sha1_digest!(A, M1, session_key);
+    pub fn new_ok_with_verifier(a: &[u8; 32], m1: &Sha1Digest, session_key: &SessionKey) -> Self {
         Self {
             cmd: commands::AUTH_LOGON_PROOF,
             error: AuthResult::Success as u8,
-            M2: todo!(),
-            accountFlags: todo!(),
-            surveyId: todo!(),
-            unkFlags: todo!(),
+            m2: sha1_digest!(a, m1, session_key),
+            account_flags: 0,
+            survey_id: 0,
+            unk_flags: 0,
         }
     }
 }
@@ -619,8 +626,8 @@ pub type SessionKey = [u8; 40];
 #[derive(Debug, IntoBytes, FromBytes, KnownLayout, Unaligned, Immutable)]
 pub struct AuthClientProof {
     pub cmd: u8,
-    pub A: [u8; 32],
-    pub M1: [u8; 20],
+    pub a: [u8; 32],
+    pub m1: [u8; 20],
     pub crc: [u8; 20],
     pub nkeys: u8,
     pub security_flags: u8,
@@ -677,7 +684,7 @@ impl AuthClientProof {
     ) -> Result<SessionKey, ProtocolError> {
         use srp6::{g, N};
 
-        let A = BigUint::from_bytes_le(&self.A);
+        let A = BigUint::from_bytes_le(&self.a);
 
         let s = BigUint::from_bytes_le(salt);
         let v = BigUint::from_bytes_be(verifier);
@@ -689,7 +696,7 @@ impl AuthClientProof {
             )));
         }
 
-        let B = AuthResponse::calculate_B(&_b, &v);
+        let B = AuthResponse::calculate_b(&_b, &v);
 
         let ABhash = sha1_digest!(A.to_bytes_le(), B.to_bytes_le());
 
@@ -734,9 +741,9 @@ impl AuthClientProof {
         );
 
         eprintln!("our_M: {}", Aha(&our_M));
-        eprintln!("their_M: {}", Aha(&self.M1));
+        eprintln!("their_M: {}", Aha(&self.m1));
 
-        if our_M == self.M1 {
+        if our_M == self.m1 {
             Ok(session_key)
         } else {
             Err(ProtocolError::AuthenticationError(format!(

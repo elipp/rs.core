@@ -1,9 +1,7 @@
-use client::opcodes::AuthResult;
-use client::{
-    generate_random_bytes, srp6, to_zero_padded_array_le, AuthResponse, ProtocolError, Salt,
-    Verifier,
-};
 use num_bigint::BigUint;
+use wow_proto::opcodes::AuthResult;
+use wow_proto::utils::to_zero_padded_array_le;
+use wow_proto::{generate_random_bytes, srp6, AuthResponse, ProtocolError, Salt, Verifier};
 
 pub mod auth;
 
@@ -44,7 +42,7 @@ pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> (AuthResponse, Big
     let b = BigUint::from_bytes_le(&_b);
     let v = BigUint::from_bytes_be(verifier);
 
-    let B = AuthResponse::calculate_B(&b, &v);
+    let B = AuthResponse::calculate_b(&b, &v);
     let B_bytes = to_zero_padded_array_le::<32>(&B.to_bytes_le());
 
     (
@@ -52,14 +50,14 @@ pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> (AuthResponse, Big
             opcode: 0x0,
             u1: 0x0,
             u2: AuthResult::Success as u8,
-            B: B_bytes,
+            b: B_bytes,
             u3: 0x1,
             g: [srp6::_g],
             u4: 0x32,
-            N: srp6::N_BYTES_LE.to_owned(),
+            n: srp6::N_BYTES_LE.to_owned(),
             salt: salt.to_owned(),
             unk1: generate_random_bytes(),
-            securityFlags: 0x0,
+            security_flags: 0x0,
         },
         b,
     )

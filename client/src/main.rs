@@ -1,27 +1,24 @@
-use client::{
-    commands::{self, CMD_REALM_LIST},
-    interleave, partition, sha1_digest, sha1_hmac, to_zero_padded_array_le, wotlk, AuthChallenge,
-    AuthChallengeWithoutUsername, AuthClientProof, AuthProtoPacketHeader, AuthResponse,
-    AuthServerProof, BigProtoPacketHeader, PacketHeader, PacketHeaderType, ProtoPacket,
-    ProtoPacketHeader, ProtocolError, RealmAuthChallenge, RealmListResult, RecvPacket, SendPacket,
-    SessionKey, Sha1Digest, WotlkAuthResponse, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY,
-    WOW_MAGIC,
-};
 use num_bigint::BigUint;
 use num_traits::Zero;
-use opcodes::{Opcode, ResponseCodes};
 use rand::Rng;
 use std::io::Cursor;
 use std::mem::size_of;
 use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use wow_proto::opcodes::{AuthOpcode, Opcode, ResponseCodes, OPCODE_NAME_MAP};
+use wow_proto::utils::{interleave, partition, to_zero_padded_array_le};
+use wow_proto::{
+    commands::{self, CMD_REALM_LIST},
+    sha1_digest, sha1_hmac, wotlk, AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof,
+    AuthProtoPacketHeader, AuthResponse, AuthServerProof, BigProtoPacketHeader, PacketHeader,
+    PacketHeaderType, ProtoPacket, ProtoPacketHeader, ProtocolError, RealmAuthChallenge,
+    RealmListResult, RecvPacket, SendPacket, SessionKey, Sha1Digest, WotlkAuthResponse, WowRc4,
+    WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
+};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use rc4::{Key, Rc4, StreamCipher};
 
-use crate::opcodes::OPCODE_NAME_MAP;
-
-pub mod opcodes;
 pub mod warden;
 
 // const REALMSERVER: &str = "logon.warmane.com:3724";
@@ -82,7 +79,7 @@ fn new_auth_challenge<'b>(
 ) -> &'b ProtoPacket<AuthProtoPacketHeader, AuthChallenge> {
     use std::io::Write;
     let header = AuthProtoPacketHeader::new(
-        opcodes::AuthOpcode::AUTH_LOGON_CHALLENGE as u16,
+        AuthOpcode::AUTH_LOGON_CHALLENGE as u16,
         size_of::<AuthChallengeWithoutUsername>() + username.as_bytes().len(),
     );
 
@@ -118,9 +115,9 @@ impl From<std::io::Error> for WowCliError {
 
 #[allow(non_snake_case)]
 fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, SessionKey)> {
-    let B = BigUint::from_bytes_le(&auth.B);
+    let B = BigUint::from_bytes_le(&auth.b);
     let g = BigUint::from_bytes_le(&auth.g);
-    let N = BigUint::from_bytes_le(&auth.N);
+    let N = BigUint::from_bytes_le(&auth.n);
 
     let k = BigUint::from(3u32);
 
@@ -155,7 +152,7 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     let s_bytes = to_zero_padded_array_le::<32>(&S.to_bytes_le());
     let (s_even, s_odd) = partition(&s_bytes);
     let session_key = interleave(&sha1_digest!(s_even), &sha1_digest!(s_odd))?;
-    let Nhash = sha1_digest!(auth.N);
+    let Nhash = sha1_digest!(auth.n);
     let ghash = sha1_digest!(auth.g);
 
     let gNhash: Vec<u8> = ghash.into_iter().zip(Nhash).map(|(g, n)| g ^ n).collect();
@@ -163,8 +160,8 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     Ok((
         AuthClientProof {
             cmd: commands::AUTH_LOGON_PROOF,
-            A: A_bytes,
-            M1: sha1_digest!(
+            a: A_bytes,
+            m1: sha1_digest!(
                 gNhash,
                 sha1_digest!(user_upper),
                 auth.salt,

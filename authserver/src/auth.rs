@@ -1,9 +1,9 @@
-use client::{sha1_digest, to_zero_padded_array_le, ProtocolError, Salt, Sha1Digest, Verifier};
 use num_bigint::BigUint;
+use wow_proto::{sha1_digest, utils::to_zero_padded_array_le, Salt, Sha1Digest, Verifier};
 use zerocopy::IntoBytes;
 
 pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> Verifier {
-    use client::srp6::{g, N};
+    use wow_proto::srp6::{g, N};
     let creds = format!("{}:{}", username_upper, password.to_ascii_uppercase());
 
     let xb = BigUint::from_bytes_le(&sha1_digest!(salt, sha1_digest!(creds)));
@@ -13,14 +13,15 @@ pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> 
 
 #[allow(unused_imports, dead_code)]
 mod test {
-    use client::{
-        interleave, partition, sha1_digest,
-        srp6::{self, N_BYTES_LE},
-        to_zero_padded_array_le, Ah, AuthResponse, Salt, SessionKey, Sha1Digest,
-    };
     use num_bigint::BigUint;
     use num_traits::Num;
     use srp6::{g, N};
+    use wow_proto::{
+        sha1_digest,
+        srp6::{self, N_BYTES_LE},
+        utils::{interleave, partition, to_zero_padded_array_le},
+        Ah, AuthResponse, Salt, SessionKey, Sha1Digest,
+    };
 
     use zerocopy::IntoBytes;
 
@@ -258,7 +259,7 @@ mod test {
             "45d9d906286c34051b6d5240383c9a02b00a1a58ff75385f4911f5300f482c04"
         );
 
-        let B = AuthResponse::calculate_B(&_b, &BigUint::from_bytes_be(&v));
+        let B = AuthResponse::calculate_b(&_b, &BigUint::from_bytes_be(&v));
 
         assert_eq!(
             &ah_be(&B.to_bytes_be()),
@@ -292,7 +293,7 @@ mod test {
         )
         .unwrap();
 
-        let calculated_B = AuthResponse::calculate_B(&_b, &BigUint::from_bytes_be(&v));
+        let calculated_B = AuthResponse::calculate_b(&_b, &BigUint::from_bytes_be(&v));
         println!("{} should be {}", Ah(&B), Ah(&calculated_B));
         assert_eq!(B, calculated_B);
     }

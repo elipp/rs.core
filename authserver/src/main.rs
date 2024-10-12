@@ -5,10 +5,11 @@ use tokio_postgres::NoTls;
 
 use deadpool_postgres::{GenericClient, ManagerConfig, RecyclingMethod, Runtime};
 
-use client::{
-    commands, generate_random_bytes, AuthChallenge, AuthClientProof, AuthProtoPacketHeader,
-    AuthServerProof, ProtoPacket, ProtocolError, RecvPacket, SendPacket,
+use wow_proto::{
+    AuthChallenge, AuthClientProof, AuthProtoPacketHeader, AuthServerProof, ProtoPacket,
+    ProtocolError, RecvPacket, SendPacket,
 };
+
 use core::str;
 use std::env;
 use std::error::Error;
@@ -109,7 +110,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         proof.verify(&account.salt, &account.verifier, &username, _b)?;
 
                     let server_proof =
-                        AuthServerProof::new_ok_with_verifier(&proof.A, &proof.M1, &session_key);
+                        AuthServerProof::new_ok_with_verifier(&proof.a, &proof.m1, &session_key);
                     server_proof.send(&mut socket).await?;
                 } else {
                     tracing::warn!("couldn't find user {username} from db");

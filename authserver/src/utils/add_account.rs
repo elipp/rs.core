@@ -1,9 +1,7 @@
 use authserver::auth::calculate_verifier;
 use clap::Parser;
-use client::{generate_random_bytes, to_zero_padded_array_le, Salt, Verifier};
-use num_bigint::BigUint;
-use num_traits::Num;
 use tokio_postgres::NoTls;
+use wow_proto::{generate_random_bytes, Salt, Verifier};
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]

@@ -1,23 +1,17 @@
 [package]
-name = "client"
+name = "wow_proto"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 crypto = "0"
 crypto-bigint = "0"
+sha1 = "0"
 hmac = "0"
-lazy_static = "1"
+rc4 = "0"
+tokio = { version = "1" }
 nohash-hasher = "0"
+rand = { version = "0.8.5", features = ["min_const_gen"] }
+zerocopy = { version = "0.8", features = ["derive"] }
 num-bigint = "0"
 num-traits = "0"
-rand = { version = "0.8.5", features = ["min_const_gen"] }
-rc4 = "0"
-sha1 = "0"
-tokio = { version = "1", features = ["rt", "macros"] }
-zerocopy = { version = "0.8", features = ["derive"] }
-wow_proto = { path="../proto" }
-
-[[bin]]
-name = "client"
-path = "src/main.rs"

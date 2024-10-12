@@ -4,4 +4,5 @@ members = [
   "authserver",
   "worldserver",
   "client",
+  "proto",
 ]
