@@ -51,7 +51,8 @@ async fn main() -> Result<(), Error> {
     // Spawn the connection task to manage the connection in the background
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("Connection error: {}", e);
+            tracing::error!("Connection error: {}", e);
+            std::process::abort();
         }
     });
 
@@ -75,9 +76,10 @@ async fn main() -> Result<(), Error> {
             )
             .await?;
         let new_id: i32 = new_row.get(0);
-        println!(
+        tracing::info!(
             "Inserted new account {} with id {:?}!",
-            args.username, new_id
+            args.username,
+            new_id
         );
         Ok(())
     }

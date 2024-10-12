@@ -42,6 +42,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .unwrap_or_else(|| "0.0.0.0:3725".to_string());
 
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(tracing::Level::TRACE)
+        // completes the builder.
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     let listener = TcpListener::bind(&addr).await?;
     tracing::info!("Listening on: {}", addr);
 
@@ -63,7 +72,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(async move {
             let res = async move {
                 // TODO: length bounds checking etc., since we're using user-provided length inputs
-                let mut buf = vec![0; 1024];
+                let mut buf = vec![0u8; 16 * 1024];
                 let ip = socket
                     .peer_addr()
                     .map_err(|e| AuthError::Error(format!("couldn't get peer addr: {e:?}")))?;
@@ -105,7 +114,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     auth_response.send(&mut socket).await?;
 
                     let proof = AuthClientProof::recv(&mut socket, &mut buf).await?;
-                    tracing::info!("got client proof {proof:?}");
+                    tracing::info!("got client proof {proof:x?}");
                     let session_key =
                         proof.verify(&account.salt, &account.verifier, &username, _b)?;
 
@@ -116,11 +125,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     tracing::warn!("couldn't find user {username} from db");
                     todo!("write unknown account packet to socket and exit")
                 }
+
+                tracing::info!("user {username} disconnecting");
                 Ok(())
             }
             .await;
             if let Err(e) = res {
                 tracing::error!("server error: {e:?}");
+            } else {
             }
         });
     }

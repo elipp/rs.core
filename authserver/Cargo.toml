@@ -18,6 +18,7 @@ num-bigint = "0"
 clap = { version = "4", features = ["derive"] }
 num-traits = "0"
 tracing = "0"
+tracing-subscriber = "0"
 wow_proto = { path="../proto" }
 
 [[bin]]

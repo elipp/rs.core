@@ -11,7 +11,7 @@ pub fn calculate_verifier(username_upper: &str, password: &str, salt: &Salt) -> 
     to_zero_padded_array_le(&v.to_bytes_be()) // TODO le/be confusion
 }
 
-#[allow(unused_imports, dead_code)]
+#[allow(unused_imports, dead_code, non_snake_case)]
 mod test {
     use num_bigint::BigUint;
     use num_traits::Num;
@@ -294,7 +294,6 @@ mod test {
         .unwrap();
 
         let calculated_B = AuthResponse::calculate_b(&_b, &BigUint::from_bytes_be(&v));
-        println!("{} should be {}", Ah(&B), Ah(&calculated_B));
         assert_eq!(B, calculated_B);
     }
 }

@@ -30,6 +30,13 @@ pub mod wotlk {
     pub const VERSION: [u8; 3] = [3, 3, 5];
 }
 
+pub mod tbc {
+    pub const VERSION: &[u8] = &[2, 4, 3];
+    pub const BUILD: u16 = 8606;
+
+    // pub const CLIENTINFO: &[u8; 12] = b"enUS\0OSX\0x86";
+}
+
 pub mod utils {
     use crate::{ProtocolError, U24};
 
@@ -84,6 +91,17 @@ pub mod utils {
         let b2 = ((u >> 16) & 0x7F) as u8 | 0x80;
 
         [b0, b1, b2]
+    }
+
+    pub fn print_as_c_array(title: &str, bytes: &[u8]) {
+        println!("{title}:");
+        for (i, b) in bytes.iter().enumerate() {
+            print!("0x{:X}, ", b);
+            if i % 10 == 9 {
+                println!("");
+            }
+        }
+        println!("");
     }
 }
 
@@ -550,19 +568,6 @@ impl AuthResponse {
     pub fn calculate_b(_b: &BigUint, verifier: &BigUint) -> BigUint {
         use srp6::{g, N};
         let three = BigUint::from(3u32);
-        println!("g: {}", Ah(&g));
-        println!("_b: {}", Ah(&_b));
-        println!("_N: {}", Ah(&*N));
-        println!("_g.ModExp(b, _N): {}", Ah(&g.modpow(&_b, &N)));
-        println!(
-            "_g.ModExp(b, _N) + (v * 3): {}",
-            Ah(&(g.modpow(&_b, &N) + (verifier * &three)))
-        );
-
-        println!(
-            "(_g.ModExp(b, _N) + (v * 3)) % N: {}",
-            Ah(&((g.modpow(&_b, &N) + (verifier * &three)) % &*N))
-        );
         (g.modpow(&_b, &N) + (verifier * three)) % &*N
     }
 }
@@ -598,7 +603,7 @@ impl AuthServerProof {
             cmd: commands::AUTH_LOGON_PROOF,
             error: AuthResult::Success as u8,
             m2: sha1_digest!(a, m1, session_key),
-            account_flags: 0,
+            account_flags: 0x00800000,
             survey_id: 0,
             unk_flags: 0,
         }
@@ -689,7 +694,6 @@ impl AuthClientProof {
         let s = BigUint::from_bytes_le(salt);
         let v = BigUint::from_bytes_be(verifier);
 
-        assert_ne!(&A % &*N, BigUint::ZERO);
         if &A % &*N == BigUint::ZERO {
             return Err(ProtocolError::AuthenticationError(format!(
                 "Provided `A` was `mod N`"
@@ -723,14 +727,6 @@ impl AuthClientProof {
         let _I = sha1_digest!(username_upper.as_bytes());
         let salt_bytes = s.to_bytes_le();
 
-        eprintln!("A: {}", Ah(&A));
-        eprintln!("B: {}", Ah(&B));
-        eprintln!("_b: {}", Ah(&_b));
-        eprintln!("v: {}", Ah(&v));
-        eprintln!("u: {}", Ah(&u));
-        eprintln!("S: {}", Ah(&S));
-        eprintln!("K: {}", Aha(&session_key));
-
         let our_M = sha1_digest!(
             NgHash,
             _I,
@@ -739,9 +735,6 @@ impl AuthClientProof {
             B.to_bytes_le(),
             session_key
         );
-
-        eprintln!("our_M: {}", Aha(&our_M));
-        eprintln!("their_M: {}", Aha(&self.m1));
 
         if our_M == self.m1 {
             Ok(session_key)

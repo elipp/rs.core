@@ -44,11 +44,6 @@ const fn reverse_array<const N: usize>(arr: [u8; N]) -> [u8; N] {
 
 const CLIENTINFO_REVERSED: [u8; 12] = reverse_array(CLIENTINFO);
 
-// const VERSION: &[u8] = &[2, 4, 3];
-// const BUILD: u16 = 8606;
-
-// const CLIENTINFO: &[u8; 12] = b"enUS\0OSX\0x86";
-
 #[derive(Debug)]
 enum WowCliError {
     RealmServerConnectionFailed,
@@ -179,6 +174,7 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
     ))
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct Realm {
     r#type: u8,
@@ -273,31 +269,6 @@ async fn request_realmlist<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         current_body = rest;
     }
     Ok(realms)
-}
-
-#[derive(Debug)]
-struct ClientPacketHeader {
-    bytes: [u8; 6],
-}
-
-impl ClientPacketHeader {
-    fn new(cmd: Opcode, length: usize) -> Self {
-        let mut bytes = [0u8; 6];
-        bytes[..2].copy_from_slice(&((length + 4) as u16).to_be_bytes());
-        bytes[2..].copy_from_slice(&(cmd as u32).to_le_bytes());
-        Self { bytes }
-    }
-}
-
-fn print_as_c_array(title: &str, bytes: &[u8]) {
-    println!("{title}:");
-    for (i, b) in bytes.iter().enumerate() {
-        print!("0x{:X}, ", b);
-        if i % 10 == 9 {
-            println!("");
-        }
-    }
-    println!("");
 }
 
 impl From<crypto::common::InvalidLength> for WowCliError {
