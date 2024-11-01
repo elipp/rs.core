@@ -7,7 +7,7 @@ use deadpool_postgres::{GenericClient, ManagerConfig, RecyclingMethod, Runtime};
 
 use wow_proto::{
     AuthChallenge, AuthClientProof, AuthProtoPacketHeader, AuthServerProof, ProtoPacket,
-    ProtocolError, RecvPacket, SendPacket,
+    ProtocolError, RecvPacket, RequestRealmlist, SendPacket,
 };
 
 use core::str;
@@ -98,7 +98,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .map_err(|e| ProtocolError::DbError(format!("Pool error: {e:?}")))?;
 
                 if let Some(account) = connection
-                    .query_opt("SELECT * FROM account WHERE username=$1", &[&username])
+                    .query_opt(
+                        "SELECT * FROM account WHERE username=$1 LIMIT 1",
+                        &[&username],
+                    )
                     .await
                     .map_err(|e| AuthError::DbError(e))?
                 {
@@ -121,9 +124,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let server_proof =
                         AuthServerProof::new_ok_with_verifier(&proof.a, &proof.m1, &session_key);
                     server_proof.send(&mut socket).await?;
+
+                    let realmlist_request = RequestRealmlist::recv(&mut socket, &mut buf).await?;
+                    dbg!(realmlist_request);
                 } else {
                     tracing::warn!("couldn't find user {username} from db");
-                    todo!("write unknown account packet to socket and exit")
+                    return Err(ProtocolError::Error(format!("unknown user")));
+                    // todo write something proper :D
                 }
 
                 tracing::info!("user {username} disconnecting");

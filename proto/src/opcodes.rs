@@ -2680,7 +2680,7 @@ add_repr_and_tryfrom!(
 );
 
 add_repr_and_tryfrom!(
-    u16,
+    u8,
     #[allow(dead_code, non_camel_case_types)]
     #[derive(Debug, Clone, Copy)]
     pub enum AuthOpcode {

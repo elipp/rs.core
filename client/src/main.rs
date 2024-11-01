@@ -8,12 +8,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wow_proto::opcodes::{AuthOpcode, Opcode, ResponseCodes, OPCODE_NAME_MAP};
 use wow_proto::utils::{interleave, partition, to_zero_padded_array_le};
 use wow_proto::{
-    commands::{self, CMD_REALM_LIST},
     sha1_digest, sha1_hmac, wotlk, AuthChallenge, AuthChallengeWithoutUsername, AuthClientProof,
     AuthProtoPacketHeader, AuthResponse, AuthServerProof, BigProtoPacketHeader, PacketHeader,
     PacketHeaderType, ProtoPacket, ProtoPacketHeader, ProtocolError, RealmAuthChallenge,
-    RealmListResult, RecvPacket, SendPacket, SessionKey, Sha1Digest, WotlkAuthResponse, WowRc4,
-    WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
+    RealmListResult, RecvPacket, RequestRealmlist, SendPacket, SessionKey, Sha1Digest,
+    WotlkAuthResponse, WowRc4, WOW_DECRYPTION_KEY, WOW_ENCRYPTION_KEY, WOW_MAGIC,
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -154,7 +153,7 @@ fn calculate_proof_SRP(auth: &AuthResponse) -> WowCliResult<(AuthClientProof, Se
 
     Ok((
         AuthClientProof {
-            cmd: commands::AUTH_LOGON_PROOF,
+            cmd: AuthOpcode::AUTH_LOGON_PROOF as u8,
             a: A_bytes,
             m1: sha1_digest!(
                 gNhash,
@@ -191,22 +190,6 @@ struct Realm {
 impl Realm {
     fn online(&self) -> bool {
         self.flags & 0x2 == 0
-    }
-}
-
-#[derive(IntoBytes, Immutable)]
-#[repr(C, packed)]
-struct RequestRealmlist {
-    cmd: u8,
-    unknown: [u8; 4],
-}
-
-impl Default for RequestRealmlist {
-    fn default() -> Self {
-        Self {
-            cmd: CMD_REALM_LIST,
-            unknown: [0; 4],
-        }
     }
 }
 
@@ -407,7 +390,7 @@ async fn main() -> WowCliResult<()> {
             .map_err(|e| WowCliError::LoginFailed)?;
 
         println!("got authresponse {:X?}", auth_response);
-        if auth_response.opcode != commands::AUTH_LOGON_CHALLENGE
+        if auth_response.opcode != AuthOpcode::AUTH_LOGON_CHALLENGE as u8
             || auth_response.u1 != 0x0
             || auth_response.u2 != 0x0
         {
@@ -420,7 +403,7 @@ async fn main() -> WowCliResult<()> {
         let server_proof = AuthServerProof::recv(&mut stream, &mut buf).await?;
 
         println!("got server proof {server_proof:?}");
-        if server_proof.cmd == commands::AUTH_LOGON_PROOF && server_proof.error == 0x0 {
+        if server_proof.cmd == (AuthOpcode::AUTH_LOGON_PROOF as u8) && server_proof.error == 0x0 {
             println!("login at {} as {} successful!", &*REALMSERVER, USERNAME);
             (request_realmlist(&mut stream).await?, session_key)
         } else {

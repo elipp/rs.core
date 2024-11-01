@@ -1,9 +1,13 @@
 use num_bigint::BigUint;
-use wow_proto::opcodes::AuthResult;
+use wow_proto::opcodes::{AuthOpcode, AuthResult};
 use wow_proto::utils::to_zero_padded_array_le;
 use wow_proto::{generate_random_bytes, srp6, AuthResponse, ProtocolError, Salt, Verifier};
 
 pub mod auth;
+
+const VERSION_CHALLENGE: [u8; 16] = [
+    0xBA, 0xA3, 0x1E, 0x99, 0xA0, 0x0B, 0x21, 0x57, 0xFC, 0x37, 0x3F, 0xB3, 0x69, 0xCD, 0xD2, 0xF1,
+];
 
 #[derive(Debug)]
 pub struct Account {
@@ -47,7 +51,7 @@ pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> (AuthResponse, Big
 
     (
         AuthResponse {
-            opcode: 0x0,
+            opcode: AuthOpcode::AUTH_LOGON_CHALLENGE as u8,
             u1: 0x0,
             u2: AuthResult::Success as u8,
             b: B_bytes,
@@ -55,8 +59,8 @@ pub fn new_auth_response(salt: &Salt, verifier: &Verifier) -> (AuthResponse, Big
             g: [srp6::_g],
             u4: 0x32,
             n: srp6::N_BYTES_LE.to_owned(),
+            version_challenge: VERSION_CHALLENGE.clone(),
             salt: salt.to_owned(),
-            unk1: generate_random_bytes(),
             security_flags: 0x0,
         },
         b,

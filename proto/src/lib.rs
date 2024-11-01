@@ -558,7 +558,7 @@ pub struct AuthResponse {
     pub u4: u8,
     pub n: [u8; 32],
     pub salt: Salt,
-    pub unk1: [u8; 16], // some versionchallenge apparently?
+    pub version_challenge: [u8; 16], // some versionchallenge apparently?
     pub security_flags: u8,
 }
 
@@ -600,7 +600,7 @@ pub struct AuthServerProof {
 impl AuthServerProof {
     pub fn new_ok_with_verifier(a: &[u8; 32], m1: &Sha1Digest, session_key: &SessionKey) -> Self {
         Self {
-            cmd: commands::AUTH_LOGON_PROOF,
+            cmd: AuthOpcode::AUTH_LOGON_PROOF as u8,
             error: AuthResult::Success as u8,
             m2: sha1_digest!(a, m1, session_key),
             account_flags: 0x00800000,
@@ -616,12 +616,6 @@ impl AuthServerProof {
     pub fn validate() -> Result<(), ProtocolError> {
         todo!()
     }
-}
-
-pub mod commands {
-    pub const AUTH_LOGON_CHALLENGE: u8 = 0x0;
-    pub const AUTH_LOGON_PROOF: u8 = 0x1;
-    pub const CMD_REALM_LIST: u8 = 0x10;
 }
 
 pub type SessionKey = [u8; 40];
@@ -889,3 +883,25 @@ where
         )
     }
 }
+
+#[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+pub struct NullHeader;
+
+#[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+pub struct RequestRealmlist {
+    cmd: u8,
+    unknown: [u8; 4],
+}
+
+impl Default for RequestRealmlist {
+    fn default() -> Self {
+        Self {
+            cmd: AuthOpcode::REALM_LIST as u8,
+            unknown: [0; 4],
+        }
+    }
+}
+
+impl FixedSizePacket for RequestRealmlist {}
